@@ -21,8 +21,19 @@ class BarRenderer(SeriesRenderer):
         else:
             plot_item.getAxis("bottom").setTicks(None)
 
-        y = pd.to_numeric(df[series.y], errors="coerce").to_numpy(dtype=float)
-        mask = np.isfinite(x_vals) & np.isfinite(y)
+        agg_name = series.agg.value if hasattr(series.agg, "value") else str(series.agg)
+        is_y_numeric = pd.api.types.is_numeric_dtype(df[series.y])
+        
+        if not is_y_numeric and agg_name != "count":
+            return None
+            
+        if agg_name == "count":
+            y = np.ones(len(df), dtype=float)
+            mask = np.isfinite(x_vals) & df[series.y].notna().to_numpy()
+        else:
+            y = pd.to_numeric(df[series.y], errors="coerce").to_numpy(dtype=float)
+            mask = np.isfinite(x_vals) & np.isfinite(y)
+            
         if not mask.any(): return None
 
         df_temp = df.loc[mask].copy()
@@ -40,8 +51,6 @@ class BarRenderer(SeriesRenderer):
 
         if df_temp.empty:
             return None
-
-        agg_name = series.agg.value if hasattr(series.agg, "value") else str(series.agg)
 
         if agg_name != "none":
             agg_dict = {"y": agg_name}
@@ -90,7 +99,6 @@ class BarRenderer(SeriesRenderer):
         if not series.color:
             base_rgb = c_map.get("base_rgb", SERIES_COLORS[default_idx % len(SERIES_COLORS)])
 
-        # 基于大小字段计算柱子宽度的比例
         if series.size and series.size in agg_df:
             sz_vals = agg_df[series.size].to_numpy(dtype=float)
             sz_min, sz_max = np.nanmin(sz_vals), np.nanmax(sz_vals)
@@ -101,7 +109,9 @@ class BarRenderer(SeriesRenderer):
         else:
             width_ratios = np.full(len(agg_df), 0.8)
 
+        agg_df["x_draw"] = agg_df["x"]  # 初始化
         results = []
+        
         if agg_name == "none":
             agg_df["idx"] = agg_df.groupby(["x", "c"]).cumcount()
             max_idx = agg_df["idx"].max() + 1 if not agg_df.empty else 1
@@ -111,21 +121,39 @@ class BarRenderer(SeriesRenderer):
                 w = base_width * width_ratios[i] / (n_series * max(1, max_idx))
                 offset = (s_idx - (n_series - 1) / 2) * w
                 x_draw = row["x"] + offset + (row["idx"] - (max_idx - 1) / 2) * w
+                agg_df.loc[agg_df.index[i], "x_draw"] = x_draw
                 
                 rgb = c_map.get("map", {}).get(row["c"], base_rgb) if series.color else base_rgb
                 bar = pg.BarGraphItem(x=[x_draw], height=[row["y"]], width=w, brush=pg.mkBrush(*rgb, 200), pen=pg.mkPen("w"))
                 viewbox.addItem(bar)
         else:
-            for i in range(len(agg_df)):
-                row = agg_df.iloc[i]
-                w = base_width * width_ratios[i] / n_series
-                offset = (s_idx - (n_series - 1) / 2) * w
-                x_draw = row["x"] + offset
-                
-                rgb = c_map.get("map", {}).get(row["c"], base_rgb) if series.color else base_rgb
-                bar = pg.BarGraphItem(x=[x_draw], height=[row["y"]], width=w, brush=pg.mkBrush(*rgb, 200), pen=pg.mkPen("w"))
-                viewbox.addItem(bar)
+            if series.color:
+                # 颜色分组并排
+                for x_val in agg_df["x"].unique():
+                    sub_x = agg_df[agg_df["x"] == x_val]
+                    n_c = len(sub_x)
+                    for j, (idx, row) in enumerate(sub_x.iterrows()):
+                        w = base_width * width_ratios[idx] / (n_series * n_c)
+                        offset = (s_idx - (n_series - 1) / 2) * (base_width * width_ratios[idx] / n_series)
+                        c_offset = (j - (n_c - 1) / 2) * w
+                        
+                        x_draw = row["x"] + offset + c_offset
+                        agg_df.loc[idx, "x_draw"] = x_draw
+                        
+                        rgb = c_map.get("map", {}).get(row["c"], base_rgb)
+                        bar = pg.BarGraphItem(x=[x_draw], height=[row["y"]], width=w, brush=pg.mkBrush(*rgb, 200), pen=pg.mkPen("w"))
+                        viewbox.addItem(bar)
+            else:
+                for i in range(len(agg_df)):
+                    row = agg_df.iloc[i]
+                    w = base_width * width_ratios[i] / n_series
+                    offset = (s_idx - (n_series - 1) / 2) * w
+                    x_draw = row["x"] + offset
+                    agg_df.loc[agg_df.index[i], "x_draw"] = x_draw
+                    
+                    bar = pg.BarGraphItem(x=[x_draw], height=[row["y"]], width=w, brush=pg.mkBrush(*base_rgb, 200), pen=pg.mkPen("w"))
+                    viewbox.addItem(bar)
 
-        agg_df = agg_df.sort_values("x").reset_index(drop=True)
-        results.append(RenderedSeries(series, agg_df["x"].values, agg_df["y"].values, None, agg_df["x"].values, agg_df["y"].values, agg_df))
+        agg_df = agg_df.sort_values("x_draw").reset_index(drop=True)
+        results.append(RenderedSeries(series, agg_df["x_draw"].values, agg_df["y"].values, None, agg_df["x_draw"].values, agg_df["y"].values, agg_df))
         return results

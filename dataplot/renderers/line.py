@@ -19,8 +19,19 @@ class LineRenderer(SeriesRenderer):
         else:
             plot_item.getAxis("bottom").setTicks(None)
 
-        y = pd.to_numeric(df[series.y], errors="coerce").to_numpy(dtype=float)
-        mask = np.isfinite(x_vals) & np.isfinite(y)
+        agg_name = series.agg.value if hasattr(series.agg, "value") else str(series.agg)
+        is_y_numeric = pd.api.types.is_numeric_dtype(df[series.y])
+        
+        if not is_y_numeric and agg_name != "count":
+            return None
+            
+        if agg_name == "count":
+            y = np.ones(len(df), dtype=float)
+            mask = np.isfinite(x_vals) & df[series.y].notna().to_numpy()
+        else:
+            y = pd.to_numeric(df[series.y], errors="coerce").to_numpy(dtype=float)
+            mask = np.isfinite(x_vals) & np.isfinite(y)
+            
         if not mask.any(): return None
         
         df_temp = df.loc[mask].copy()
@@ -36,7 +47,6 @@ class LineRenderer(SeriesRenderer):
         else:
             df_temp["c"] = "all"
 
-        agg_name = series.agg.value if hasattr(series.agg, "value") else str(series.agg)
         c_map = context.get("color_map") or {}
         default_idx = context.get("index", 0)
         

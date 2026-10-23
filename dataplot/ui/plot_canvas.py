@@ -100,10 +100,9 @@ class PlotCanvas(QWidget):
         self.btn_rect.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_rect.clicked.connect(self._toggle_rect_mode)
         
-        # 浮动图上下平移控制按钮
         self.btn_float_up = QToolButton(self.layout_widget)
         self.btn_float_up.setText("↑")
-        self.btn_float_up.setToolTip("向上移动所有浮动图形（也可以直接在图上左键拖拽浮动图形）")
+        self.btn_float_up.setToolTip("向上移动所有浮动图形")
         self.btn_float_up.setStyleSheet(btn_style)
         self.btn_float_up.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_float_up.clicked.connect(lambda: self._shift_float_y(0.1))
@@ -125,9 +124,6 @@ class PlotCanvas(QWidget):
         self.btn_float_down.hide()
 
         self.layout_widget.scene().sigMouseMoved.connect(self._on_mouse_moved)
-        
-        # 启动时渲染欢迎图表
-        self._render_welcome()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -151,56 +147,6 @@ class PlotCanvas(QWidget):
                     vb.scene().removeItem(vb)
         self.cells.clear()
         self.layout_widget.clear()
-
-    def _render_welcome(self):
-        """渲染酷炫的洛伦兹吸引子欢迎背景"""
-        self._cleanup_cells()
-        self.layout_widget.setMinimumSize(0, 0)
-        self.layout_widget.setMaximumSize(16777215, 16777215)
-        
-        pi = self.layout_widget.addPlot(row=0, col=0)
-        pi.hideAxis('left')
-        pi.hideAxis('bottom')
-        pi.setAspectLocked(True)
-        pi.setMouseEnabled(x=False, y=False)
-        
-        # 计算洛伦兹吸引子
-        dt = 0.005
-        sigma, rho, beta = 10.0, 28.0, 8.0/3.0
-        x, y, z = 1.0, 1.0, 1.0
-        xs, ys = [], []
-        for i in range(15000):
-            dx = sigma * (y - x)
-            dy = x * (rho - z) - y
-            dz = x * y - beta * z
-            x += dx * dt
-            y += dy * dt
-            z += dz * dt
-            if i > 1000:
-                xs.append(x)
-                ys.append(z)  # 取 X-Z 投影
-                
-        cmap = pg.ColorMap([0, 0.5, 1], [(60, 130, 220), (240, 200, 80), (220, 70, 70)])
-        t = np.linspace(0, 1, len(xs))
-        colors = cmap.map(t, mode='byte')
-        brushes = [pg.mkBrush(*c[:3], 180) for c in colors]
-        
-        scatter = pg.ScatterPlotItem(x=xs, y=ys, size=2, brush=brushes, pen=None)
-        pi.addItem(scatter)
-        
-        text = pg.TextItem(
-            "DataPlot\n\n请在上方工具栏点击「加载文件」\n支持 CSV / XLSX / PKL",
-            color=(80, 80, 80), anchor=(0.5, 0.5)
-        )
-        font = text.textItem.font()
-        font.setPointSize(16)
-        font.setBold(True)
-        text.setFont(font)
-        text.setPos(np.mean(xs), np.mean(ys))
-        pi.addItem(text)
-        
-        self.btn_float_up.hide()
-        self.btn_float_down.hide()
 
     def _reset_view(self):
         for cell in self.cells:
@@ -237,7 +183,6 @@ class PlotCanvas(QWidget):
 
     def render(self):
         if not self.store.is_loaded:
-            self._render_welcome()
             return [], []
 
         self._cleanup_cells()
@@ -350,7 +295,7 @@ class PlotCanvas(QWidget):
                 if hf in sub_df.columns:
                     h_agg_name = h_agg.value if hasattr(h_agg, "value") else str(h_agg)
                     if not pd.api.types.is_numeric_dtype(sub_df[hf]) and h_agg_name in ["mean", "sum", "var", "std"]:
-                        msg = f"字段 '{hf}' 为文本，不支持 '{h_agg_name}' 聚合，已忽略。"
+                        msg = f"悬停字段 '{hf}' 为文本，不支持 '{h_agg_name}' 聚合，已忽略。"
                         if msg not in warnings:
                             warnings.append(msg)
                     else:
@@ -358,6 +303,15 @@ class PlotCanvas(QWidget):
 
             for idx, s in enumerate(self.spec.series):
                 if s.chart_type != ChartType.HISTOGRAM and s.y is None: continue
+                
+                if s.chart_type != ChartType.HISTOGRAM and s.y:
+                    is_y_numeric = pd.api.types.is_numeric_dtype(sub_df[s.y])
+                    agg_name = s.agg.value if hasattr(s.agg, "value") else str(s.agg)
+                    if not is_y_numeric and agg_name != "count":
+                        msg = f"Y序列 '{s.y}' 为文本，不支持 '{agg_name}' 聚合，该序列未绘制。"
+                        if msg not in warnings:
+                            warnings.append(msg)
+                        continue
 
                 series_name = s.y or s.color or f"series_{idx}"
                 is_series_hidden = f"{series_name}||" in self.spec.hidden_categories
@@ -369,7 +323,6 @@ class PlotCanvas(QWidget):
                     vb = rvb
                     if s.y: right_y = s.y
                 else:
-                    # 核心修改：浮动轴允许鼠标左键上下拖动，关闭 X 轴移动
                     vb = pg.ViewBox()
                     pi.scene().addItem(vb)
                     vb.setXLink(pi.vb)
@@ -409,8 +362,13 @@ class PlotCanvas(QWidget):
 
                 result = renderer.render(pi, vb, s_df, x_col, s, context)
                 if result:
-                    if isinstance(result, list): cell["rendered"].extend(result)
-                    else: cell["rendered"].append(result)
+                    if isinstance(result, list): 
+                        for r in result:
+                            r.vb = vb  # 动态绑定对应的 ViewBox
+                        cell["rendered"].extend(result)
+                    else: 
+                        result.vb = vb
+                        cell["rendered"].append(result)
 
             if col == 0 and left_y: pi.setLabel("left", left_y)
             if col == n_cols - 1 and has_right and right_y: pi.getAxis("right").setLabel(right_y)
@@ -443,83 +401,103 @@ class PlotCanvas(QWidget):
         if not rendered:
             self.tooltip.hide(); return
 
-        mouse_pt = pi.vb.mapSceneToView(pos)
-        mx, my = mouse_pt.x(), mouse_pt.y()
-        px_size_x, px_size_y = pi.vb.viewPixelSize()
-        
-        snapped_x = None
-        for rs in rendered:
-            if rs.spec.chart_type == ChartType.SCATTER and rs.tree is not None:
-                dist, idx = rs.tree.query([mx, my])
-                dx_px = (rs.x[idx] - mx) / px_size_x if px_size_x > 0 else 0
-                dy_px = (rs.y[idx] - my) / px_size_y if px_size_y > 0 else 0
-                if np.sqrt(dx_px**2 + dy_px**2) < 15:
-                    snapped_x = rs.x[idx]
-                    break
-        
-        x_data = snapped_x if snapped_x is not None else mx
-        if self.x_labels is not None:
-            idx = int(round(x_data))
-            if 0 <= idx < len(self.x_labels):
-                display_x = self.x_labels[idx]
-                x_data = float(idx)
-            else:
-                display_x = str(x_data)
-        else:
-            display_x = f"{x_data:.4g}"
+        best_rs = None
+        best_idx = -1
+        min_px_dist = float('inf')
 
-        x_col_name = self.spec.x or "X"
-        lines = [f"<b>{x_col_name} = {display_x}</b>"]
-        
         for rs in rendered:
-            hit = False
-            row = None
+            vb = getattr(rs, "vb", None)
+            if vb is None: continue
             
-            if rs.spec.chart_type == ChartType.SCATTER and rs.tree is not None:
-                dist, idx = rs.tree.query([x_data, my])
-                dx_px = (rs.x[idx] - x_data) / px_size_x if px_size_x > 0 else 0
-                dy_px = (rs.y[idx] - my) / px_size_y if px_size_y > 0 else 0
-                if np.sqrt(dx_px**2 + dy_px**2) < 15:
-                    hit = True
-                    row = rs.data.iloc[idx]
-            else:
-                if rs.sorted_x is not None and len(rs.sorted_x) > 0:
-                    idx = np.searchsorted(rs.sorted_x, x_data)
-                    idx = min(max(idx, 0), len(rs.sorted_x) - 1)
-                    if idx > 0 and abs(rs.sorted_x[idx-1] - x_data) < abs(rs.sorted_x[idx] - x_data):
-                        idx -= 1
-                    
-                    x_near = rs.sorted_x[idx]
-                    view_range = pi.vb.viewRange()
-                    x_span = view_range[0][1] - view_range[0][0]
-                    
-                    if self.x_labels is not None:
-                        if round(x_near) == round(x_data): hit = True
-                    else:
-                        if x_span > 0 and abs(x_near - x_data) <= x_span * 0.02: hit = True
-                            
-                    if hit and rs.data is not None and idx < len(rs.data):
-                        row = rs.data.iloc[idx]
+            # 将鼠标位置映射到该系列所属的具体 ViewBox 坐标系中
+            pt = vb.mapSceneToView(pos)
+            cur_mx, cur_my = pt.x(), pt.y()
+            px_size_x, px_size_y = vb.viewPixelSize()
             
-            if hit and row is not None:
-                name = rs.spec.y or rs.spec.chart_type.value
-                y_val = row.get(rs.spec.y, row.get("y", 0))
-                label = name
-                if rs.spec.color and "c" in row:
-                    label += f" ({row['c']})"
-                lines.append(f"<b>{label}: {y_val:.4g}</b>")
+            if rs.tree is not None:
+                # 散点图：二维距离
+                dist, idx = rs.tree.query([cur_mx, cur_my])
+                dx_px = (rs.x[idx] - cur_mx) / px_size_x if px_size_x > 0 else 0
+                dy_px = (rs.y[idx] - cur_my) / px_size_y if px_size_y > 0 else 0
+                px_dist = np.hypot(dx_px, dy_px)
+            elif rs.sorted_x is not None and len(rs.sorted_x) > 0:
+                # 折线图/柱状图：找最近的 X 轴点
+                idx = np.searchsorted(rs.sorted_x, cur_mx)
+                idx = min(max(idx, 0), len(rs.sorted_x) - 1)
+                if idx > 0 and abs(rs.sorted_x[idx-1] - cur_mx) < abs(rs.sorted_x[idx] - cur_mx):
+                    idx -= 1
                 
-                for hf in self.spec.hover_fields:
-                    if hf in row:
-                        val = row[hf]
-                        if isinstance(val, float): val = f"{val:.4g}"
-                        lines.append(f"{hf}: {val}")
+                rx, ry = rs.sorted_x[idx], rs.sorted_y[idx]
+                dx_px = (rx - cur_mx) / px_size_x if px_size_x > 0 else 0
+                dy_px = (ry - cur_my) / px_size_y if px_size_y > 0 else 0
+                
+                if rs.spec.chart_type == ChartType.BAR:
+                    # 柱状图：只要水平在柱子范围附近即可
+                    if abs(dx_px) < 20:
+                        px_dist = abs(dx_px)
+                    else:
+                        px_dist = np.hypot(dx_px, dy_px)
+                else:
+                    # 折线图：靠近折线点
+                    px_dist = np.hypot(dx_px, dy_px)
+                    
+            if px_dist < min_px_dist:
+                min_px_dist = px_dist
+                best_rs = rs
+                best_idx = idx
 
-        if len(lines) == 1:
-            self.tooltip.hide(); return
+        if best_rs is not None and min_px_dist < 25:
+            row = best_rs.data.iloc[best_idx]
+            
+            # 提取真实的 X 轴显示值
+            if "x" in row:
+                x_val = row["x"]
+            elif "x_plot" in row:
+                x_val = row["x_plot"]
+            else:
+                x_val = best_rs.sorted_x[best_idx]
 
-        self.tooltip.setText("<br>".join(lines))
-        self.tooltip.adjustSize()
-        local = self.layout_widget.mapFromScene(pos)
-        self.tooltip.move(local.x() + 14, local.y() + 14)
-        self.tooltip.show()
+            if self.x_labels is not None:
+                idx_x = int(round(x_val))
+                display_x = self.x_labels[idx_x] if 0 <= idx_x < len(self.x_labels) else str(x_val)
+            else:
+                display_x = f"{x_val:.4g}"
+
+            x_col_name = self.spec.x or "X"
+            lines = [f"<b>{x_col_name} = {display_x}</b>"]
+            
+            name = best_rs.spec.y or best_rs.spec.chart_type.value
+            if "y" in row:
+                y_val = row["y"]
+            elif "y_plot" in row:
+                y_val = row["y_plot"]
+            else:
+                y_val = row.get(best_rs.spec.y, 0)
+                
+            if isinstance(y_val, (float, int, np.number)):
+                y_val_str = f"{y_val:.4g}"
+            else:
+                y_val_str = str(y_val)
+
+            label = name
+            if best_rs.spec.color and "c" in row:
+                label += f" ({row['c']})"
+                
+            lines.append(f"<b>{label}: {y_val_str}</b>")
+            
+            for hf in self.spec.hover_fields:
+                if hf in row:
+                    val = row[hf]
+                    if isinstance(val, (float, int, np.number)):
+                        val_str = f"{val:.4g}"
+                    else:
+                        val_str = str(val)
+                    lines.append(f"{hf}: {val_str}")
+
+            self.tooltip.setText("<br>".join(lines))
+            self.tooltip.adjustSize()
+            local = self.layout_widget.mapFromScene(pos)
+            self.tooltip.move(local.x() + 14, local.y() + 14)
+            self.tooltip.show()
+        else:
+            self.tooltip.hide()
