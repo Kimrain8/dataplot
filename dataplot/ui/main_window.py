@@ -1,9 +1,10 @@
+import pandas as pd
 from PySide6.QtCore import Qt, QPoint
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QPen
 from PySide6.QtWidgets import (
     QFileDialog, QHBoxLayout, QLabel, QListWidgetItem, QListWidget,
     QMainWindow, QPushButton, QVBoxLayout, QWidget, QScrollArea, QMessageBox,
-    QComboBox, QCompleter, QFrame
+    QComboBox, QCompleter, QFrame, QDialog
 )
 from dataplot.core.datastore import DataStore
 from dataplot.core.spec import ChartSpec, AggType
@@ -13,52 +14,43 @@ from dataplot.ui.legend_panel import LegendPanel
 from dataplot.ui.plot_canvas import PlotCanvas
 from dataplot.ui.series_table import SeriesTable
 from dataplot.ui.drop_combo import DropComboBox
+from dataplot.ui.data_source_dialog import DataSourceDialog
+
+DB_IMPORT_ERROR = None
+try:
+    from utils.dbManager import MySQLHelper
+except Exception as e:
+    import traceback
+    MySQLHelper = None
+    DB_IMPORT_ERROR = traceback.format_exc()
 
 
 def create_app_icon() -> QIcon:
-    """用 QPainter 动态绘制一个带有柱状图和折线的科技感图标"""
     pixmap = QPixmap(256, 256)
     pixmap.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-    
-    # 1. 深色科技感圆角背景
-    painter.setBrush(QColor(30, 41, 59))  # 深蓝灰
+    painter.setBrush(QColor(30, 41, 59))
     painter.setPen(Qt.PenStyle.NoPen)
     painter.drawRoundedRect(16, 16, 224, 224, 48, 48)
-    
-    # 2. 绘制底层彩色柱状图 (蓝, 绿, 黄, 红)
     colors = [QColor(59, 130, 246), QColor(16, 185, 129), QColor(245, 158, 11), QColor(239, 68, 68)]
     for i, color in enumerate(colors):
         painter.setBrush(color)
         x = 48 + i * 44
         height = (i * 17) % 80 + 60
         painter.drawRoundedRect(x, 224 - height - 24, 28, height, 8, 8)
-        
-    # 3. 绘制上层白色折线图
     pen = QPen(QColor(255, 255, 255))
     pen.setWidth(8)
     pen.setCapStyle(Qt.PenCapStyle.RoundCap)
     pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
     painter.setPen(pen)
     painter.setBrush(Qt.BrushStyle.NoBrush)
-    
-    # 向上的数据趋势折线
-    points = [
-        QPoint(48, 140),
-        QPoint(88, 100),
-        QPoint(128, 120),
-        QPoint(168, 60),
-        QPoint(208, 80)
-    ]
+    points = [QPoint(48, 140), QPoint(88, 100), QPoint(128, 120), QPoint(168, 60), QPoint(208, 80)]
     painter.drawPolyline(points)
-    
-    # 4. 绘制折线上的高亮数据点
     painter.setBrush(QColor(255, 255, 255))
     painter.setPen(Qt.PenStyle.NoPen)
     for pt in points:
         painter.drawEllipse(pt, 10, 10)
-        
     painter.end()
     return QIcon(pixmap)
 
@@ -97,20 +89,24 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("DataPlot")
-        # 设置动态生成的图标
         self.setWindowIcon(create_app_icon())
-        
         self.resize(1500, 850)
 
         self.store = DataStore()
         self.spec = ChartSpec()
+        self._last_series_count = 0
+
+        # 常驻数据源弹窗
+        self.data_source_dialog = None
+        if MySQLHelper:
+            self.data_source_dialog = DataSourceDialog(MySQLHelper, self)
+            self.data_source_dialog.data_applied.connect(self._on_data_applied)
 
         central = QWidget()
         self.setCentralWidget(central)
         root = QHBoxLayout(central)
         root.setContentsMargins(4, 4, 4, 4)
 
-        # 左侧面板
         self.left_panel = CollapsiblePanel("数据源", direction="left", expanded_width=260)
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
@@ -120,10 +116,11 @@ class MainWindow(QMainWindow):
         left_lay = QVBoxLayout(left_widget)
         left_lay.setSpacing(10)
         
-        self.sql_group = CollapsibleGroupBox("SQL 编辑器 (开发中)", expanded=False)
-        self.sql_placeholder = QLabel("此处预留给 SQL 查询编辑器。\n当前请点击上方工具栏加载文件。")
-        self.sql_placeholder.setStyleSheet("color: #888; font-size: 11px; padding: 10px;")
-        self.sql_group.addWidget(self.sql_placeholder)
+        self.sql_group = CollapsibleGroupBox("数据获取", expanded=True)
+        self.btn_open_source = QPushButton("打开数据源编辑器 (SQL/Python)")
+        self.btn_open_source.setStyleSheet("padding: 8px; font-weight: bold; background: #e0f2fe; border: 1px solid #7dd3fc;")
+        self.btn_open_source.clicked.connect(self._open_data_source)
+        self.sql_group.addWidget(self.btn_open_source)
         left_lay.addWidget(self.sql_group)
         
         self.field_group = CollapsibleGroupBox("字段列表", expanded=True)
@@ -136,11 +133,9 @@ class MainWindow(QMainWindow):
         self.left_panel.content_layout().addWidget(left_scroll)
         root.addWidget(self.left_panel)
 
-        # 中央画布
         self.canvas = PlotCanvas(self.store, self.spec)
         root.addWidget(self.canvas, 1)
 
-        # 右侧面板
         self.right_panel = CollapsiblePanel("配置", direction="right", expanded_width=380)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -156,9 +151,7 @@ class MainWindow(QMainWindow):
         tip.setWordWrap(True)
         right_lay.addWidget(tip)
 
-        # 切片配置
         self.facet_group = CollapsibleGroupBox("切片 (Facet)", expanded=True)
-        
         facet_row1 = QHBoxLayout()
         facet_row1.addWidget(QLabel("X 切片:"))
         self.facet_x_combo = DropComboBox("无")
@@ -183,7 +176,6 @@ class MainWindow(QMainWindow):
         size_lay.addWidget(self.cell_size_combo)
         size_lay.addStretch()
         self.facet_group.addLayout(size_lay)
-        
         right_lay.addWidget(self.facet_group)
 
         self.x_group = CollapsibleGroupBox("X 轴（全局）", expanded=True)
@@ -198,16 +190,13 @@ class MainWindow(QMainWindow):
         self.y_group.addWidget(self.series_table)
         right_lay.addWidget(self.y_group)
 
-        # 悬停字段
         self.hover_group = CollapsibleGroupBox("悬停额外字段", expanded=True)
-        
         self.hover_combo = QComboBox()
         self.hover_combo.setEditable(True)
         self.hover_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.hover_combo.setPlaceholderText("输入或选择字段...")
         self.hover_combo.lineEdit().returnPressed.connect(self._add_hover_field)
         self.hover_combo.activated.connect(self._add_hover_field)
-        
         self.hover_group.addWidget(self.hover_combo)
         
         self.hover_tags_widget = QWidget()
@@ -216,7 +205,6 @@ class MainWindow(QMainWindow):
         self.hover_tags_layout.setSpacing(4)
         self.hover_tags_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self.hover_group.addWidget(self.hover_tags_widget)
-        
         right_lay.addWidget(self.hover_group)
 
         self.legend_group = CollapsibleGroupBox("图例（点击隐藏/显示）", expanded=False)
@@ -231,31 +219,41 @@ class MainWindow(QMainWindow):
         root.addWidget(self.right_panel)
 
         toolbar = self.addToolBar("主")
-        act_load = toolbar.addAction("加载文件")
+        act_load = toolbar.addAction("加载本地文件")
         act_load.triggered.connect(self._load_file)
+        
+        act_source = toolbar.addAction("打开数据源")
+        act_source.triggered.connect(self._open_data_source)
 
         self.statusBar().showMessage("就绪")
         
-    def _on_cell_size_changed(self, index):
-        val = self.cell_size_combo.itemData(index)
-        if val:
-            self.canvas.cell_size = val
-            self._rerender()
+    def _open_data_source(self):
+        if not MySQLHelper:
+            QMessageBox.critical(self, "模块加载失败", f"无法加载 utils.dbManager。\n错误详情:\n{DB_IMPORT_ERROR}")
+            return
+        self.data_source_dialog.show()
+        self.data_source_dialog.raise_()
+        self.data_source_dialog.activateWindow()
 
-    def _load_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "选择数据文件", "", "数据文件 (*.csv *.xlsx *.xls *.pkl)")
-        if not path: return
-        try:
-            df = self.store.load(path)
-        except Exception as exc:
-            self.statusBar().showMessage(f"加载失败: {exc}"); return
+    def _on_data_applied(self, df):
+        if df is None or df.empty:
+            return
             
+        # 直接调用底层的统一推断规则
+        df = DataStore.infer_types(df)
+                        
+        self.store.df = df
+        self.store._refresh_columns()
+        self._refresh_fields_and_cols()
+        self.statusBar().showMessage(f"成功应用数据源: {len(df)} 行 × {len(df.columns)} 列")
+
+    def _refresh_fields_and_cols(self):
         self.field_list.clear()
         self.hover_combo.clear()
         self.spec.hidden_categories.clear()
         self._refresh_hover_tags()
         
-        cols = df.columns.tolist()
+        cols = self.store.df.columns.tolist()
         self.series_table.set_fields(cols)
         
         for combo in [self.x_combo, self.facet_x_combo, self.facet_y_combo]:
@@ -266,26 +264,45 @@ class MainWindow(QMainWindow):
             combo.combo.blockSignals(False)
         
         for col in cols:
-            w = FieldItemWidget(col, str(df[col].dtype))
+            w = FieldItemWidget(col, str(self.store.df[col].dtype))
             w.typeChanged.connect(self._on_type_changed)
             item = QListWidgetItem()
             item.setSizeHint(w.sizeHint())
             self.field_list.addItem(item)
             self.field_list.setItemWidget(item, w)
-            
             self.hover_combo.addItem(col)
 
         completer = self.hover_combo.completer()
         if completer:
             completer.setFilterMode(Qt.MatchFlag.MatchContains)
             completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+            
+        self._last_series_count = len(self.spec.series)
+        self._rerender(reset_view=True)  # 加载新数据时重置视图
+
+    def _on_cell_size_changed(self, index):
+        val = self.cell_size_combo.itemData(index)
+        if val:
+            self.canvas.cell_size = val
+            self._rerender(reset_view=False)
+
+    def _load_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "选择数据文件", "", "数据文件 (*.csv *.xlsx *.xls *.pkl)")
+        if not path: return
+        try:
+            df = self.store.load(path)
+        except Exception as exc:
+            self.statusBar().showMessage(f"加载失败: {exc}"); return
+            
+        self._refresh_fields_and_cols()
+        self.statusBar().showMessage(f"已加载本地文件 {len(df)} 行")
 
     def _add_hover_field(self):
         field = self.hover_combo.currentText().strip()
         if field and field not in self.spec.hover_fields:
             self.spec.hover_fields[field] = AggType.MEAN
             self._refresh_hover_tags()
-            self._rerender()
+            self._rerender(reset_view=False)
         self.hover_combo.setCurrentIndex(-1)
         self.hover_combo.clearEditText()
 
@@ -293,12 +310,12 @@ class MainWindow(QMainWindow):
         if field in self.spec.hover_fields:
             del self.spec.hover_fields[field]
             self._refresh_hover_tags()
-            self._rerender()
+            self._rerender(reset_view=False)
             
     def _on_hover_agg_changed(self, field, agg):
         if field in self.spec.hover_fields:
             self.spec.hover_fields[field] = agg
-            self._rerender()
+            self._rerender(reset_view=False)
 
     def _refresh_hover_tags(self):
         while self.hover_tags_layout.count():
@@ -315,7 +332,7 @@ class MainWindow(QMainWindow):
         ok, err = self.store.convert_type(col, dtype)
         if not ok:
             QMessageBox.critical(self, "转换失败", f"字段 {col} 无法转换为 {dtype}：\n{err}")
-        self._rerender()
+        self._rerender(reset_view=False)
 
     def _on_legend_toggled(self, series_name, category):
         key = f"{series_name}||{category}"
@@ -323,26 +340,34 @@ class MainWindow(QMainWindow):
             self.spec.hidden_categories.remove(key)
         else:
             self.spec.hidden_categories.add(key)
-        self._rerender()
+        self._rerender(reset_view=False)
 
     def _on_x(self, field: str):
         self.spec.x = field or None
-        self._rerender()
-        
+        self._rerender(reset_view=True)
+
     def _on_facet_x(self, field: str):
         self.spec.facet_x = field or None
-        self._rerender()
+        self._rerender(reset_view=True)
         
     def _on_facet_y(self, field: str):
         self.spec.facet_y = field or None
-        self._rerender()
+        self._rerender(reset_view=True)
 
     def _on_series_changed(self):
         self.spec.series = self.series_table.specs()
-        self._rerender()
+        current_count = len(self.spec.series)
+        
+        # 判断是否新增了序列
+        if current_count > self._last_series_count:
+            self._last_series_count = current_count
+            self._rerender(reset_view=True)  # 新增时重置
+        else:
+            self._last_series_count = current_count
+            self._rerender(reset_view=False) # 修改参数时不重置
 
-    def _rerender(self):
-        res = self.canvas.render() or ([], [])
+    def _rerender(self, reset_view=False):
+        res = self.canvas.render(reset_view=reset_view) or ([], [])
         legends, warnings = res
         
         if warnings:

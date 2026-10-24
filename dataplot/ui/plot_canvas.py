@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 import pyqtgraph as pg
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget, QToolButton, QScrollArea
+from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget, QToolButton, QScrollArea, QMenu
 
 from dataplot.core.spec import AxisSlot, ChartType, ChartSpec
 from dataplot.renderers.registry import get_renderer
@@ -58,6 +58,7 @@ class PlotCanvas(QWidget):
         self.x_labels = None
         self.cells = []
         self.cell_size = 400
+        self._saved_ranges = None
 
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
@@ -80,18 +81,24 @@ class PlotCanvas(QWidget):
             "QToolButton { background: rgba(255,255,255,0.85); border: 1px solid #aaa; "
             "border-radius: 4px; padding: 4px; font-size: 14px; font-weight: bold; }"
             "QToolButton:hover { background: #e0e0e0; }"
+            "QToolButton::menu-indicator { image: none; }"
         )
         btn_active_style = (
             "QToolButton { background: #bfdbfe; border: 1px solid #3b82f6; "
             "border-radius: 4px; padding: 4px; font-size: 14px; font-weight: bold; }"
         )
         
+        # 核心改造：带下拉菜单的适应窗口按钮
         self.btn_reset = QToolButton(self.layout_widget)
         self.btn_reset.setText("↺")
-        self.btn_reset.setToolTip("适应窗口")
+        self.btn_reset.setToolTip("适应窗口 (点击选择Y轴变量)")
+        self.btn_reset.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.btn_reset.setStyleSheet(btn_style)
         self.btn_reset.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_reset.clicked.connect(self._reset_view)
+        
+        self.reset_menu = QMenu(self.btn_reset)
+        self.btn_reset.setMenu(self.reset_menu)
+        self.reset_menu.aboutToShow.connect(self._build_reset_menu)
         
         self.btn_rect = QToolButton(self.layout_widget)
         self.btn_rect.setText("⬚")
@@ -134,6 +141,27 @@ class PlotCanvas(QWidget):
             self.btn_float_up.move(w - 35, 10)
             self.btn_float_down.move(w - 35, 45)
 
+    def _build_reset_menu(self):
+        """动态构建适应窗口的下拉菜单"""
+        self.reset_menu.clear()
+        
+        act_all = self.reset_menu.addAction("适应全部")
+        act_all.triggered.connect(self._reset_view)
+        
+        if not self.spec.series:
+            return
+            
+        self.reset_menu.addSeparator()
+        seen_y = set()
+        for s in self.spec.series:
+            if not s.y or s.y in seen_y:
+                continue
+            seen_y.add(s.y)
+            
+            label = f"{s.y} ({s.axis.value})"
+            act = self.reset_menu.addAction(label)
+            act.triggered.connect(lambda checked=False, spec=s: self._reset_view_specific(spec))
+
     def _cleanup_cells(self):
         for cell in self.cells:
             rvb = cell.get("right_vb")
@@ -148,11 +176,79 @@ class PlotCanvas(QWidget):
         self.cells.clear()
         self.layout_widget.clear()
 
+    def _save_current_ranges(self):
+        if not self.cells:
+            return
+        saved = []
+        for c in self.cells:
+            s = {
+                "main": c["plot_item"].vb.viewRange(),
+                "right": c["right_vb"].viewRange() if c["right_vb"] else None,
+                "floats": [vb.viewRange() for vb in c["floating_vbs"]]
+            }
+            saved.append(s)
+        self._saved_ranges = saved
+
     def _reset_view(self):
+        self._saved_ranges = None
         for cell in self.cells:
             cell["plot_item"].vb.autoRange()
             if cell["right_vb"]: cell["right_vb"].autoRange()
             for vb in cell["floating_vbs"]: vb.autoRange()
+        self._save_current_ranges()
+
+    def _reset_view_specific(self, target_spec):
+        """针对特定 Series 自适应缩放"""
+        all_matching_rs = []
+        for cell in self.cells:
+            for rs in cell["rendered"]:
+                if rs.spec == target_spec:
+                    all_matching_rs.append(rs)
+                    
+        if not all_matching_rs:
+            return
+            
+        # 计算全局 X 范围
+        x_vals = []
+        for rs in all_matching_rs:
+            x_vals.extend(rs.x[np.isfinite(rs.x)])
+        
+        if not x_vals:
+            return
+        x_min, x_max = min(x_vals), max(x_vals)
+        if x_min == x_max:
+            x_min -= 1
+            x_max += 1
+            
+        for cell in self.cells:
+            cell_rs = [rs for rs in cell["rendered"] if rs.spec == target_spec]
+            if not cell_rs:
+                continue
+                
+            y_vals = []
+            for rs in cell_rs:
+                y_vals.extend(rs.y[np.isfinite(rs.y)])
+                
+            if not y_vals:
+                continue
+            y_min, y_max = min(y_vals), max(y_vals)
+            if y_min == y_max:
+                y_min -= 1
+                y_max += 1
+                
+            pi = cell["plot_item"]
+            pi.vb.setXRange(x_min, x_max, padding=0.05)
+            
+            if target_spec.axis == AxisSlot.LEFT:
+                pi.vb.setYRange(y_min, y_max, padding=0.05)
+            elif target_spec.axis == AxisSlot.RIGHT:
+                if cell["right_vb"]:
+                    cell["right_vb"].setYRange(y_min, y_max, padding=0.05)
+            else:
+                for fvb in cell["floating_vbs"]:
+                    fvb.setYRange(y_min, y_max, padding=0.05)
+                    
+        self._save_current_ranges()
 
     def _toggle_rect_mode(self):
         self._rect_mode = not self._rect_mode
@@ -169,6 +265,7 @@ class PlotCanvas(QWidget):
                 y_span = y_range[1] - y_range[0]
                 new_center = y_center + y_span * ratio
                 vb.setYRange(new_center - y_span/2, new_center + y_span/2, padding=0)
+        self._save_current_ranges()
 
     def _sync_cell_vb(self, cell):
         pi = cell["plot_item"]
@@ -181,9 +278,14 @@ class PlotCanvas(QWidget):
             vb.setGeometry(rect)
             vb.linkedViewChanged(pi.vb, vb.XAxis)
 
-    def render(self):
+    def render(self, reset_view=False):
         if not self.store.is_loaded:
             return [], []
+
+        if not reset_view:
+            self._save_current_ranges()
+        else:
+            self._saved_ranges = None
 
         self._cleanup_cells()
         self.tooltip.hide()
@@ -364,7 +466,7 @@ class PlotCanvas(QWidget):
                 if result:
                     if isinstance(result, list): 
                         for r in result:
-                            r.vb = vb  # 动态绑定对应的 ViewBox
+                            r.vb = vb
                         cell["rendered"].extend(result)
                     else: 
                         result.vb = vb
@@ -372,11 +474,40 @@ class PlotCanvas(QWidget):
 
             if col == 0 and left_y: pi.setLabel("left", left_y)
             if col == n_cols - 1 and has_right and right_y: pi.getAxis("right").setLabel(right_y)
+
+            if self._saved_ranges and i < len(self._saved_ranges):
+                sr = self._saved_ranges[i]
+                pi.vb.setXRange(sr["main"][0][0], sr["main"][0][1], padding=0)
+                pi.vb.setYRange(sr["main"][1][0], sr["main"][1][1], padding=0)
+                if rvb and sr["right"]:
+                    rvb.setYRange(sr["right"][1][0], sr["right"][1][1], padding=0)
+                for j, fvb in enumerate(cell["floating_vbs"]):
+                    if j < len(sr["floats"]):
+                        fr = sr["floats"][j]
+                        fvb.setYRange(fr[1][0], fr[1][1], padding=0)
+            else:
+                has_drawn_left = False
+                has_drawn_right = False
+                has_drawn_float = False
+                for rs in cell["rendered"]:
+                    ax = rs.spec.axis
+                    if ax == AxisSlot.LEFT and not has_drawn_left:
+                        pi.vb.autoRange(padding=0.05)
+                        has_drawn_left = True
+                    elif ax == AxisSlot.RIGHT and not has_drawn_right and rvb:
+                        rvb.autoRange(padding=0.05)
+                        has_drawn_right = True
+                    elif ax == AxisSlot.FLOATING and not has_drawn_float:
+                        for fvb in cell["floating_vbs"]:
+                            fvb.autoRange(padding=0.05)
+                        has_drawn_float = True
                 
-            pi.vb.autoRange(padding=0.05)
-            rvb.autoRange(padding=0.05)
-            for vb in cell["floating_vbs"]: vb.autoRange(padding=0.05)
+                if not has_drawn_left and not has_drawn_right and not has_drawn_float:
+                    pi.vb.autoRange(padding=0.05)
+                
             self._sync_cell_vb(cell)
+
+        self._save_current_ranges()
 
         if has_float:
             self.btn_float_up.show()
@@ -396,7 +527,6 @@ class PlotCanvas(QWidget):
         if active_cell is None:
             self.tooltip.hide(); return
 
-        pi = active_cell["plot_item"]
         rendered = active_cell["rendered"]
         if not rendered:
             self.tooltip.hide(); return
@@ -409,19 +539,16 @@ class PlotCanvas(QWidget):
             vb = getattr(rs, "vb", None)
             if vb is None: continue
             
-            # 将鼠标位置映射到该系列所属的具体 ViewBox 坐标系中
             pt = vb.mapSceneToView(pos)
             cur_mx, cur_my = pt.x(), pt.y()
             px_size_x, px_size_y = vb.viewPixelSize()
             
             if rs.tree is not None:
-                # 散点图：二维距离
                 dist, idx = rs.tree.query([cur_mx, cur_my])
                 dx_px = (rs.x[idx] - cur_mx) / px_size_x if px_size_x > 0 else 0
                 dy_px = (rs.y[idx] - cur_my) / px_size_y if px_size_y > 0 else 0
                 px_dist = np.hypot(dx_px, dy_px)
             elif rs.sorted_x is not None and len(rs.sorted_x) > 0:
-                # 折线图/柱状图：找最近的 X 轴点
                 idx = np.searchsorted(rs.sorted_x, cur_mx)
                 idx = min(max(idx, 0), len(rs.sorted_x) - 1)
                 if idx > 0 and abs(rs.sorted_x[idx-1] - cur_mx) < abs(rs.sorted_x[idx] - cur_mx):
@@ -432,13 +559,11 @@ class PlotCanvas(QWidget):
                 dy_px = (ry - cur_my) / px_size_y if px_size_y > 0 else 0
                 
                 if rs.spec.chart_type == ChartType.BAR:
-                    # 柱状图：只要水平在柱子范围附近即可
                     if abs(dx_px) < 20:
                         px_dist = abs(dx_px)
                     else:
                         px_dist = np.hypot(dx_px, dy_px)
                 else:
-                    # 折线图：靠近折线点
                     px_dist = np.hypot(dx_px, dy_px)
                     
             if px_dist < min_px_dist:
@@ -449,7 +574,6 @@ class PlotCanvas(QWidget):
         if best_rs is not None and min_px_dist < 25:
             row = best_rs.data.iloc[best_idx]
             
-            # 提取真实的 X 轴显示值
             if "x" in row:
                 x_val = row["x"]
             elif "x_plot" in row:

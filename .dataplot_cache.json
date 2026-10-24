@@ -1,0 +1,8 @@
+{
+  "py_code": "df2 = df[df['vol']>10]\n",
+  "sql_code": "select mcs.name_hy ,qqt.update_time,mcs.sw_l3 ,sum(qqt.vol) as vol,sum(qqt.amount) as amount,\nsum(case when qqt.pct_chg > 0 then 1 else 0 end) as cnt1,sum(case when qqt.pct_chg < 0 then 1 else 1 end) as cnt2,\nsum(case when qqt.pct_chg > 0 then 1 else 0 end)/(sum(case when qqt.pct_chg > 0 then 1 else 0 end) +sum(case when qqt.pct_chg < 0 then 1 else 1 end)) as pct\nfrom qq_qt_detail_tmp AS qqt join my_choice_stock AS mcs on qqt.symbol = mcs.symbol\nwhere qqt.update_time >= '2026-10-15 09:32:00'\ngroup by mcs.name_hy,qqt.update_time ,mcs.sw_l3\nhaving pct >= 0.15\norder by pct desc;",
+  "db_list": [
+    "jhd",
+    "ginger2"
+  ]
+}

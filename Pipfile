@@ -11,6 +11,10 @@ numpy = "*"
 openpyxl = "*"
 scipy = "*"
 pyarrow = "*"
+pygments = "*"
+mysql-connector-python = "*"
+pycryptodome = "*"
+cryptography = "*"
 
 [dev-packages]
 

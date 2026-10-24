@@ -1,4 +1,3 @@
-from PySide6.QtGui import QFont
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QDoubleValidator
 from PySide6.QtWidgets import (
@@ -21,7 +20,6 @@ class SeriesRow(QWidget):
         main_layout.setContentsMargins(4, 4, 4, 4)
         main_layout.setSpacing(4)
         
-        # 第一行：Y字段(2)，类型(1)，轴(1)
         row1 = QHBoxLayout()
         row1.setSpacing(4)
         
@@ -46,13 +44,10 @@ class SeriesRow(QWidget):
         
         main_layout.addLayout(row1)
         
-        # 第二行：桶(1)，聚合(1)，颜色(2)，色系(1)
         row2 = QHBoxLayout()
         row2.setSpacing(4)
 
         row2.addWidget(QLabel("桶:"))
-        
-        # 核心修复：用 QLineEdit 替代 QDoubleSpinBox，彻底杜绝白底白字和乱码
         self.bin_input = QLineEdit()
         self.bin_input.setPlaceholderText("0")
         self.bin_input.setText(str(spec.bin_width))
@@ -83,7 +78,6 @@ class SeriesRow(QWidget):
         
         main_layout.addLayout(row2)
         
-        # 第三行：大小(2)，大小聚合(1)，删除按钮
         row3 = QHBoxLayout()
         row3.setSpacing(4)
 
@@ -199,7 +193,20 @@ class SeriesTable(QWidget):
         event.acceptProposedAction()
 
     def add_series(self, spec: SeriesSpec | None = None) -> SeriesRow:
-        row = SeriesRow(spec or SeriesSpec(), self._fields)
+        # 核心：自动分配轴
+        if spec is None:
+            count = len(self._rows)
+            if count == 0:
+                axis = AxisSlot.LEFT
+            elif count == 1:
+                axis = AxisSlot.RIGHT
+            elif count == 2:
+                axis = AxisSlot.FLOATING
+            else:
+                axis = AxisSlot.LEFT
+            spec = SeriesSpec(axis=axis)
+            
+        row = SeriesRow(spec, self._fields)
         row.changed.connect(self.changed)
         row.removed.connect(self._remove_row)
         self._rows.append(row)

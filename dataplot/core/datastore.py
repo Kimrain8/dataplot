@@ -20,38 +20,66 @@ class DataStore:
             return self.df
             
         if path.endswith(".csv"):
-            df_str = pd.read_csv(path, dtype=str)
+            df = pd.read_csv(path, dtype=str)
         elif path.endswith((".xlsx", ".xls")):
-            df_str = pd.read_excel(path, dtype=str)
+            df = pd.read_excel(path, dtype=str)
         else:
             raise ValueError(f"不支持的文件格式: {path}")
 
-        # 智能转换：保留前导 0 的字符串，其余尝试转为数值或日期
-        df = pd.DataFrame()
-        for col in df_str.columns:
-            s = df_str[col]
-            has_leading_zero = s.str.match(r'^0\d+$', na=False).any()
+        self.df = self.infer_types(df)
+        self._refresh_columns()
+        return self.df
+
+    @staticmethod
+    def infer_types(df: pd.DataFrame) -> pd.DataFrame:
+        """按规则推断：前导0保护、严格日期、包含小数转float、变长整数转float"""
+        df = df.copy()
+        for col in df.columns:
+            if df[col].dtype != 'object':
+                continue
+                
+            valid_series = df[col].dropna()
+            if len(valid_series) == 0:
+                continue
+                
+            valid_strs = valid_series.astype(str).str.strip()
+            valid_strs = valid_strs[valid_strs != ""]
+            if len(valid_strs) == 0:
+                continue
+
+            # 规则 1：前导 0 保护（只针对纯整数，如 003068）
+            if valid_strs.str.match(r'^0\d+$').any():
+                continue
+
+            # 规则 2：严格日期/时间格式
+            # 必须包含两个 - 或 /，或者两个 :，并且全部是数字和合法分隔符
+            # 涵盖：yyyy-mm-dd, yy/mm/dd, yyyy-mm-dd hh:mm:ss 等
+            date_pattern = r'^\d{2,4}[-/]\d{1,2}[-/]\d{1,2}([ T]\d{1,2}:\d{1,2}(:\d{1,2})?)?$|^\d{1,2}:\d{1,2}(:\d{1,2})?$'
             
-            if not has_leading_zero:
-                # 尝试转换为数值
-                s_num = pd.to_numeric(s, errors='coerce')
-                if not s_num.isna().all() and s_num.isna().sum() < len(s) * 0.5:
-                    df[col] = s_num
-                    continue
-                    
-                # 尝试转换为日期
+            # 如果所有非空字符串都完美符合该模式，才尝试转日期
+            if valid_strs.str.match(date_pattern).all():
                 try:
-                    s_date = pd.to_datetime(s, errors='coerce', format="mixed")
-                    if not s_date.isna().all() and s_date.isna().sum() < len(s) * 0.5:
-                        df[col] = s_date
+                    converted_dt = pd.to_datetime(valid_strs, errors='coerce')
+                    if converted_dt.notna().sum() == len(valid_strs):
+                        df[col] = pd.to_datetime(df[col], errors='coerce')
                         continue
                 except Exception:
                     pass
-            
-            df[col] = s
-            
-        self.df = df
-        self._refresh_columns()
+
+            # 规则 3.1：包含小数点，直接判定为浮点数
+            if valid_strs.str.contains('.', regex=False).any():
+                df[col] = pd.to_numeric(df[col].astype(str).str.replace(',', ''), errors='coerce').astype(float)
+                continue
+
+            # 规则 3.2：纯整数判定
+            is_all_int = valid_strs.str.match(r'^-?\d+$').all()
+            if is_all_int:
+                lengths = set(len(s.lstrip('-')) for s in valid_strs)
+                if len(lengths) > 1:
+                    df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
+                else:
+                    continue
+
         return df
 
     def _refresh_columns(self):
