@@ -15,6 +15,7 @@ pygments = "*"
 mysql-connector-python = "*"
 pycryptodome = "*"
 cryptography = "*"
+pyinstaller = "*"
 
 [dev-packages]
 

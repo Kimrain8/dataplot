@@ -15,8 +15,28 @@ from PySide6.QtWidgets import (
 from dataplot.ui.code_editor import CodeEditor
 from dataplot.ui.pandas_model import PandasModel
 
+# ============ 核心：适配 PyInstaller 打包后的路径 ============
+def get_base_path():
+    """获取资源路径（打包后指向临时解压目录）"""
+    if getattr(sys, 'frozen', False):
+        return getattr(sys, '_MEIPASS', os.path.dirname(sys.executable))
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-CACHE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".dataplot_cache.json")
+def get_exe_dir():
+    """获取可执行文件所在目录（用于存放可写的缓存文件）"""
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+BASE_PATH = get_base_path()
+EXE_DIR = get_exe_dir()
+										
+						
+							   
+
+# 缓存文件放在 exe 同级目录，模板放在打包的内部资源目录
+CACHE_FILE = os.path.join(EXE_DIR, ".dataplot_cache.json")
+# CACHE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".dataplot_cache.json")
 
 class ExecuteWorker(QThread):
     # ... (保持不变) ...
@@ -61,8 +81,31 @@ class ExecuteWorker(QThread):
 
             current_db = self.namespace.get('db')
             if current_db is None or getattr(current_db, 'db', None) != self.db_name:
-                self.namespace['db'] = self.db_helper_class(db=self.db_name)
-                print(f"✅ 数据库环境已切换至: {self.db_name}")
+                default_path = r'D:\pyprj\cv2\utils\config.json'
+                config_path = default_path
+                
+                # 如果默认路径不存在，尝试在当前目录（打包后的 exe 目录或运行目录）找
+                if not os.path.exists(config_path):
+                    if getattr(sys, 'frozen', False):
+                        exe_dir = os.path.dirname(sys.executable)
+                    else:
+                        exe_dir = os.getcwd()
+                    fallback_path = os.path.join(exe_dir, 'config.json')
+                    if os.path.exists(fallback_path):
+                        config_path = fallback_path
+                        print(f"⚠️ 默认配置未找到，已自动回退到当前目录: {config_path}")
+
+                # 尝试实例化连接
+                try:
+                    self.namespace['db'] = self.db_helper_class(config_path=config_path, db=self.db_name)
+                    print(f"✅ 数据库环境已切换至: {self.db_name}")
+                except Exception as e:
+                    print(f"❌ 数据库连接失败，配置路径: {config_path}")
+                    print(f"错误详情: {e}")
+                    # 清理单例池中的脏实例，以便下次重试
+                    if hasattr(self.db_helper_class, '_instance_pool') and self.db_name in self.db_helper_class._instance_pool:
+                        del self.db_helper_class._instance_pool[self.db_name]
+                    raise e
 
             if actual_mode == "python":
                 exec(self.code, self.namespace)
@@ -215,8 +258,8 @@ class DataSourceDialog(QDialog):
             pass
 
     def _read_template(self, mode):
-        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        template_path = os.path.join(base_dir, "templates", f"{mode}_template.{'py' if mode == 'python' else 'sql'}")
+        # base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        template_path = os.path.join(BASE_PATH, "templates", f"{mode}_template.{'py' if mode == 'python' else 'sql'}")
         if os.path.exists(template_path):
             with open(template_path, "r", encoding="utf-8") as f:
                 return f.read()
