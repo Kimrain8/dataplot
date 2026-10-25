@@ -40,7 +40,6 @@ class BarRenderer(SeriesRenderer):
         df_temp["x"] = x_vals[mask]
         df_temp["y"] = y[mask]
         
-        # 分桶逻辑
         if series.bin_width > 0 and labels is None:
             df_temp["x"] = (df_temp["x"] // series.bin_width) * series.bin_width
         
@@ -96,8 +95,8 @@ class BarRenderer(SeriesRenderer):
         c_map = ctx.get("color_map") or {}
         default_idx = ctx.get("index", 0)
         
-        if not series.color:
-            base_rgb = c_map.get("base_rgb", SERIES_COLORS[default_idx % len(SERIES_COLORS)])
+        # 核心修复：无论是否有颜色字段，都提前定义 base_rgb，防止变量未定义报错
+        base_rgb = c_map.get("base_rgb", SERIES_COLORS[default_idx % len(SERIES_COLORS)])
 
         if series.size and series.size in agg_df:
             sz_vals = agg_df[series.size].to_numpy(dtype=float)
@@ -109,7 +108,7 @@ class BarRenderer(SeriesRenderer):
         else:
             width_ratios = np.full(len(agg_df), 0.8)
 
-        agg_df["x_draw"] = agg_df["x"]  # 初始化
+        agg_df["x_draw"] = agg_df["x"]
         results = []
         
         if agg_name == "none":
@@ -128,7 +127,6 @@ class BarRenderer(SeriesRenderer):
                 viewbox.addItem(bar)
         else:
             if series.color:
-                # 颜色分组并排
                 for x_val in agg_df["x"].unique():
                     sub_x = agg_df[agg_df["x"] == x_val]
                     n_c = len(sub_x)

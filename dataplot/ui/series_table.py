@@ -1,7 +1,6 @@
 from PySide6.QtCore import Signal
-from PySide6.QtGui import QDoubleValidator
 from PySide6.QtWidgets import (
-    QComboBox, QHBoxLayout, QPushButton, QVBoxLayout, QWidget, QLabel, QSizePolicy, QLineEdit
+    QComboBox, QHBoxLayout, QPushButton, QVBoxLayout, QWidget, QLabel
 )
 
 from dataplot.core.spec import AxisSlot, ChartType, SeriesSpec, AggType, ColorTheme
@@ -47,22 +46,13 @@ class SeriesRow(QWidget):
         row2 = QHBoxLayout()
         row2.setSpacing(4)
 
-        row2.addWidget(QLabel("桶:"))
-        self.bin_input = QLineEdit()
-        self.bin_input.setPlaceholderText("0")
-        self.bin_input.setText(str(spec.bin_width))
-        self.bin_input.setValidator(QDoubleValidator(0.0, 999999.0, 2, self.bin_input))
-        self.bin_input.setToolTip("X轴分桶大小，0为不分桶")
-        self.bin_input.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.bin_input.editingFinished.connect(self._on_bin_changed)
-        row2.addWidget(self.bin_input, 1)
-
+        row2.addWidget(QLabel("聚合:"))
         self.agg_combo = QComboBox()
         for at in AggType:
             self.agg_combo.addItem(at.value, at)
         self.agg_combo.setCurrentText(spec.agg.value)
         self.agg_combo.currentIndexChanged.connect(self._on_agg)
-        row2.addWidget(self.agg_combo, 1)
+        row2.addWidget(self.agg_combo, 2)
 
         self.color_combo = DropComboBox("颜色", fields)
         if spec.color: self.color_combo.set_field(spec.color)
@@ -105,14 +95,17 @@ class SeriesRow(QWidget):
         self._sync()
 
     def _on_y(self, f):
+        if " > " in f: return
         self.spec.y = f or None
         self.changed.emit()
 
     def _on_color(self, f):
+        if " > " in f: return
         self.spec.color = f or None
         self.changed.emit()
 
     def _on_size(self, f):
+        if " > " in f: return
         self.spec.size = f or None
         self.changed.emit()
         
@@ -120,17 +113,6 @@ class SeriesRow(QWidget):
         val = self.size_agg_combo.currentData()
         self.spec.size_agg = val if isinstance(val, AggType) else AggType(val)
         self.changed.emit()
-
-    def _on_bin_changed(self):
-        text = self.bin_input.text().strip()
-        try:
-            val = float(text) if text else 0.0
-        except ValueError:
-            val = 0.0
-            
-        if self.spec.bin_width != val:
-            self.spec.bin_width = val
-            self.changed.emit()
 
     def _on_type(self):
         val = self.type_combo.currentData()
@@ -175,7 +157,7 @@ class SeriesTable(QWidget):
         self._layout.addLayout(self._rows_container)
 
         self.add_btn = QPushButton("+ 添加 series（或从左侧拖入）")
-        self.add_btn.clicked.connect(self.add_series)
+        self.add_btn.clicked.connect(lambda: self.add_series())
         self._layout.addWidget(self.add_btn)
         self._layout.addStretch()
 
@@ -189,21 +171,17 @@ class SeriesTable(QWidget):
     def dropEvent(self, event):
         if not event.mimeData().hasText(): return
         field = event.mimeData().text()
+        if " > " in field: return
         self.add_series(SeriesSpec(y=field))
         event.acceptProposedAction()
 
     def add_series(self, spec: SeriesSpec | None = None) -> SeriesRow:
-        # 核心：自动分配轴
         if spec is None:
             count = len(self._rows)
-            if count == 0:
-                axis = AxisSlot.LEFT
-            elif count == 1:
-                axis = AxisSlot.RIGHT
-            elif count == 2:
-                axis = AxisSlot.FLOATING
-            else:
-                axis = AxisSlot.LEFT
+            if count == 0: axis = AxisSlot.LEFT
+            elif count == 1: axis = AxisSlot.RIGHT
+            elif count == 2: axis = AxisSlot.FLOATING
+            else: axis = AxisSlot.LEFT
             spec = SeriesSpec(axis=axis)
             
         row = SeriesRow(spec, self._fields)
@@ -220,6 +198,13 @@ class SeriesTable(QWidget):
             self._rows_container.removeWidget(row)
             row.deleteLater()
             self.changed.emit()
+
+    def clear_all(self):
+        for row in self._rows:
+            self._rows_container.removeWidget(row)
+            row.deleteLater()
+        self._rows.clear()
+        self.changed.emit()
 
     def specs(self) -> list[SeriesSpec]:
         return [r.spec for r in self._rows]

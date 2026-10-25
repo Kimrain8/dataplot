@@ -57,13 +57,19 @@ def get_color_mapping(df: pd.DataFrame, color_col: str | None, theme_name: str =
         filled = series.astype("object").where(series.notna(), "<缺失>").astype(str)
         uniques = filled.unique()
         n = len(uniques)
+        if n == 0: return None, None
+        
+        # 核心修复：预先生成完全确定的调色盘映射表，确保画布和图例 100% 一致
+        lut = cmap.getLookupTable(nPts=max(n, 2), alpha=False)
+        
         color_dict = {}
         entries = []
         for i, u in enumerate(uniques):
-            t = i / max(1, n - 1) if n > 1 else 0.5
-            rgb = cmap.map([t], mode="byte")[0][:3]
-            color_dict[u] = tuple(rgb)
-            entries.append((u, tuple(rgb)))
+            idx = int(i / max(1, n - 1) * (len(lut) - 1)) if n > 1 else 0
+            rgb = tuple(int(c) for c in lut[idx][:3])
+            color_dict[u] = rgb
+            entries.append((str(u), rgb))
+            
         c_map = {"type": "categorical", "map": color_dict}
         return c_map, ColorLegend(color_col, "categorical", entries=entries)
 
@@ -87,7 +93,7 @@ def make_brushes(df: pd.DataFrame, color_col: str | None, default_index: int, co
         return [pg.mkBrush(*c, 170) for c in rgb]
 
     brushes = []
-    for val in series.astype(str):
+    for val in series.astype("object").where(series.notna(), "<缺失>").astype(str):
         rgb = color_map["map"].get(val, (100, 100, 100))
         brushes.append(pg.mkBrush(*rgb, 170))
     return brushes

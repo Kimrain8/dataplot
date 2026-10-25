@@ -49,7 +49,8 @@ class LegendPanel(QWidget):
                 row.setSpacing(4)
                 
                 is_cat_hidden = f"{series_name}||{name}" in hidden_categories or is_series_hidden
-                opacity = "0.3" if is_cat_hidden else "1.0"
+                # 核心修复：画布使用了 alpha=170 (约0.66)，图例也必须保持一致的透明度
+                opacity = "0.2" if is_cat_hidden else "0.66"
                 
                 sw = QLabel()
                 sw.setFixedSize(12, 12)

@@ -1,70 +1,61 @@
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QPointF, QRectF
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget, QToolButton, QScrollArea, QMenu
 
-from dataplot.core.spec import AxisSlot, ChartType, ChartSpec
+from dataplot.core.spec import AxisSlot, ChartType, ChartSpec, AggType
 from dataplot.renderers.registry import get_renderer
 from dataplot.core.encoding import get_color_mapping, ColorLegend, THEME_CMAPS
+from dataplot.config import HOVER_TOLERANCE_PX, TOOLTIP_OFFSET_X, TOOLTIP_OFFSET_Y
 
+class AngledAxisItem(pg.AxisItem):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.setStyle(tickTextOffset=10)
 
-class CustomGraphicsLayoutWidget(pg.GraphicsLayoutWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._ctrl_panning = False
-        self._last_pos = None
-
-    def mousePressEvent(self, ev):
-        if ev.modifiers() & Qt.KeyboardModifier.ControlModifier and ev.button() == Qt.MouseButton.LeftButton:
-            self._ctrl_panning = True
-            self._last_pos = ev.pos()
-            self.setCursor(Qt.CursorShape.ClosedHandCursor)
-            ev.accept()
-        else:
-            super().mousePressEvent(ev)
-
-    def mouseMoveEvent(self, ev):
-        if self._ctrl_panning:
-            delta = ev.pos() - self._last_pos
-            self._last_pos = ev.pos()
-            scroll_area = self.parent()
-            while scroll_area and not isinstance(scroll_area, QScrollArea):
-                scroll_area = scroll_area.parent()
-                
-            if isinstance(scroll_area, QScrollArea):
-                h_bar = scroll_area.horizontalScrollBar()
-                v_bar = scroll_area.verticalScrollBar()
-                h_bar.setValue(h_bar.value() - delta.x())
-                v_bar.setValue(v_bar.value() - delta.y())
-            ev.accept()
-        else:
-            super().mouseMoveEvent(ev)
-
-    def mouseReleaseEvent(self, ev):
-        if self._ctrl_panning:
-            self._ctrl_panning = False
-            self.setCursor(Qt.CursorShape.ArrowCursor)
-            ev.accept()
-        else:
-            super().mouseReleaseEvent(ev)
-
+    def drawPicture(self, p, axisSpec, tickSpecs, textSpecs):
+        # 核心修复：兼容新版 pyqtgraph 的元组解包结构 (pen, p1, p2)
+        p.setRenderHint(p.RenderHint.Antialiasing, False)
+        p.setRenderHint(p.RenderHint.TextAntialiasing, True)
+        
+        # 绘制轴线
+        pen, p1, p2 = axisSpec
+        p.setPen(pen)
+        p.drawLine(p1, p2)
+        
+        # 绘制刻度
+        for tick in tickSpecs:
+            pen, p1, p2 = tick
+            p.setPen(pen)
+            p.drawLine(p1, p2)
+            
+        # 绘制倾斜文本
+        p.setPen(self.textPen())
+        p.setFont(self.font())
+        for rect, flags, text in textSpecs:
+            p.save()
+            # 将原点移动至刻度的正下方
+            p.translate(rect.center().x(), rect.top())
+            p.rotate(-45) 
+            # 在原点处右对齐、顶对齐绘制文本（确保文本往左下角延伸，不覆盖轴线）
+            p.drawText(QRectF(-200, 0, 200, 50), Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop, text)
+            p.restore()
 
 class PlotCanvas(QWidget):
     def __init__(self, store, spec: ChartSpec, parent=None):
         super().__init__(parent)
         self.store = store
         self.spec = spec
-        self.x_labels = None
         self.cells = []
         self.cell_size = 400
         self._saved_ranges = None
-
+        
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
         
-        self.layout_widget = CustomGraphicsLayoutWidget()
+        self.layout_widget = pg.GraphicsLayoutWidget()
         self.layout_widget.setBackground("w")
         self.scroll_area.setWidget(self.layout_widget)
         
@@ -88,10 +79,9 @@ class PlotCanvas(QWidget):
             "border-radius: 4px; padding: 4px; font-size: 14px; font-weight: bold; }"
         )
         
-        # 核心改造：带下拉菜单的适应窗口按钮
         self.btn_reset = QToolButton(self.layout_widget)
         self.btn_reset.setText("↺")
-        self.btn_reset.setToolTip("适应窗口 (点击选择Y轴变量)")
+        self.btn_reset.setToolTip("适应窗口")
         self.btn_reset.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.btn_reset.setStyleSheet(btn_style)
         self.btn_reset.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -142,22 +132,15 @@ class PlotCanvas(QWidget):
             self.btn_float_down.move(w - 35, 45)
 
     def _build_reset_menu(self):
-        """动态构建适应窗口的下拉菜单"""
         self.reset_menu.clear()
-        
         act_all = self.reset_menu.addAction("适应全部")
         act_all.triggered.connect(self._reset_view)
-        
-        if not self.spec.series:
-            return
-            
+        if not self.spec.series: return
         self.reset_menu.addSeparator()
         seen_y = set()
         for s in self.spec.series:
-            if not s.y or s.y in seen_y:
-                continue
+            if not s.y or s.y in seen_y: continue
             seen_y.add(s.y)
-            
             label = f"{s.y} ({s.axis.value})"
             act = self.reset_menu.addAction(label)
             act.triggered.connect(lambda checked=False, spec=s: self._reset_view_specific(spec))
@@ -167,18 +150,15 @@ class PlotCanvas(QWidget):
             rvb = cell.get("right_vb")
             if rvb:
                 rvb.clear()
-                if rvb.scene():
-                    rvb.scene().removeItem(rvb)
+                if rvb.scene(): rvb.scene().removeItem(rvb)
             for vb in cell.get("floating_vbs", []):
                 vb.clear()
-                if vb.scene():
-                    vb.scene().removeItem(vb)
+                if vb.scene(): vb.scene().removeItem(vb)
         self.cells.clear()
         self.layout_widget.clear()
 
     def _save_current_ranges(self):
-        if not self.cells:
-            return
+        if not self.cells: return
         saved = []
         for c in self.cells:
             s = {
@@ -198,63 +178,40 @@ class PlotCanvas(QWidget):
         self._save_current_ranges()
 
     def _reset_view_specific(self, target_spec):
-        """针对特定 Series 自适应缩放"""
         all_matching_rs = []
         for cell in self.cells:
             for rs in cell["rendered"]:
-                if rs.spec == target_spec:
-                    all_matching_rs.append(rs)
-                    
-        if not all_matching_rs:
-            return
-            
-        # 计算全局 X 范围
+                if rs.spec == target_spec: all_matching_rs.append(rs)
+        if not all_matching_rs: return
         x_vals = []
-        for rs in all_matching_rs:
-            x_vals.extend(rs.x[np.isfinite(rs.x)])
-        
-        if not x_vals:
-            return
+        for rs in all_matching_rs: x_vals.extend(rs.x[np.isfinite(rs.x)])
+        if not x_vals: return
         x_min, x_max = min(x_vals), max(x_vals)
-        if x_min == x_max:
-            x_min -= 1
-            x_max += 1
+        if x_min == x_max: x_min -= 1; x_max += 1
             
         for cell in self.cells:
             cell_rs = [rs for rs in cell["rendered"] if rs.spec == target_spec]
-            if not cell_rs:
-                continue
-                
+            if not cell_rs: continue
             y_vals = []
-            for rs in cell_rs:
-                y_vals.extend(rs.y[np.isfinite(rs.y)])
-                
-            if not y_vals:
-                continue
+            for rs in cell_rs: y_vals.extend(rs.y[np.isfinite(rs.y)])
+            if not y_vals: continue
             y_min, y_max = min(y_vals), max(y_vals)
-            if y_min == y_max:
-                y_min -= 1
-                y_max += 1
+            if y_min == y_max: y_min -= 1; y_max += 1
                 
             pi = cell["plot_item"]
             pi.vb.setXRange(x_min, x_max, padding=0.05)
-            
             if target_spec.axis == AxisSlot.LEFT:
                 pi.vb.setYRange(y_min, y_max, padding=0.05)
             elif target_spec.axis == AxisSlot.RIGHT:
-                if cell["right_vb"]:
-                    cell["right_vb"].setYRange(y_min, y_max, padding=0.05)
+                if cell["right_vb"]: cell["right_vb"].setYRange(y_min, y_max, padding=0.05)
             else:
-                for fvb in cell["floating_vbs"]:
-                    fvb.setYRange(y_min, y_max, padding=0.05)
-                    
+                for fvb in cell["floating_vbs"]: fvb.setYRange(y_min, y_max, padding=0.05)
         self._save_current_ranges()
 
     def _toggle_rect_mode(self):
         self._rect_mode = not self._rect_mode
         mode = pg.ViewBox.RectMode if self._rect_mode else pg.ViewBox.PanMode
-        for cell in self.cells:
-            cell["plot_item"].vb.setMouseMode(mode)
+        for cell in self.cells: cell["plot_item"].vb.setMouseMode(mode)
         self.btn_rect.setStyleSheet(self._btn_active_style if self._rect_mode else self._btn_style)
 
     def _shift_float_y(self, ratio):
@@ -278,28 +235,67 @@ class PlotCanvas(QWidget):
             vb.setGeometry(rect)
             vb.linkedViewChanged(pi.vb, vb.XAxis)
 
-    def render(self, reset_view=False):
-        if not self.store.is_loaded:
-            return [], []
+    def _process_data(self, df):
+        is_hierarchy = bool(self.spec.x_hierarchy)
+        
+        if is_hierarchy:
+            for s in self.spec.series:
+                if s.agg == AggType.NONE: s.agg = AggType.COUNT
+                if s.size_agg == AggType.NONE: s.size_agg = AggType.MEAN
+            for hf, ha in self.spec.hover_fields.items():
+                if ha == AggType.NONE: self.spec.hover_fields[hf] = AggType.COUNT
 
-        if not reset_view:
-            self._save_current_ranges()
+        # 时间与数值分桶
+        for col, bucket in self.spec.bucket_settings.items():
+            if col in df.columns and bucket and bucket != "不分组":
+                if pd.api.types.is_datetime64_any_dtype(df[col]):
+                    try:
+                        # 核心修复：直接格式化为字符串，供 get_x_values 识别为类别
+                        if bucket == "1H": df[col] = df[col].dt.strftime("%Y-%m-%d %H:00")
+                        elif bucket == "1D": df[col] = df[col].dt.strftime("%Y-%m-%d")
+                        elif bucket == "W": df[col] = df[col].dt.to_period('W').dt.start_time.dt.strftime("%Y-%m-%d")
+                        elif bucket == "M": df[col] = df[col].dt.strftime("%Y-%m")
+                        elif bucket == "Y": df[col] = df[col].dt.strftime("%Y")
+                    except Exception:
+                        pass
+                elif pd.api.types.is_numeric_dtype(df[col]):
+                    try:
+                        w = float(bucket)
+                        if w > 0: df[col] = (df[col] // w) * w
+                    except:
+                        pass
+                    
+        if is_hierarchy:
+            valid_cols = [c for c in self.spec.x_hierarchy if c in df.columns]
+            if valid_cols:
+                df["__x_layer__"] = df[valid_cols].astype(str).agg(" > ".join, axis=1)
+                self.spec.x = "__x_layer__"
+            else:
+                self.spec.x = None
         else:
-            self._saved_ranges = None
+            if "__x_layer__" in df.columns:
+                df.drop(columns=["__x_layer__"], inplace=True)
+        return df
+
+    def render(self, reset_view=False):
+        if not self.store.is_loaded: return [], []
+
+        if not reset_view: self._save_current_ranges()
+        else: self._saved_ranges = None
 
         self._cleanup_cells()
         self.tooltip.hide()
 
+        df = self._process_data(self.store.df.copy())
         x_col = self.spec.x
         self.x_labels = None
-        if x_col:
+        if x_col and x_col in df.columns:
             from dataplot.renderers.base import get_x_values
-            _, labels = get_x_values(self.store.df, x_col)
+            _, labels = get_x_values(df, x_col)
             self.x_labels = labels
+        elif not x_col:
+            return [], []
 
-        if x_col is None: return [], []
-
-        df = self.store.df
         facets = [(None, None)]
         if self.spec.facet_x or self.spec.facet_y:
             df_f = df.copy()
@@ -308,56 +304,45 @@ class PlotCanvas(QWidget):
             if fx: df_f[fx] = df_f[fx].fillna("<缺失>").astype(str)
             if fy: df_f[fy] = df_f[fy].fillna("<缺失>").astype(str)
             
-            if fx and fy:
-                facets = df_f.groupby([fy, fx], sort=False).size().index.tolist()
-            elif fx:
-                facets = [(None, v) for v in df_f[fx].unique()]
-            else:
-                facets = [(v, None) for v in df_f[fy].unique()]
+            if fx and fy: facets = df_f.groupby([fy, fx], sort=False).size().index.tolist()
+            elif fx: facets = [(None, v) for v in df_f[fx].unique()]
+            else: facets = [(v, None) for v in df_f[fy].unique()]
                 
         n_cols = len(set(c[1] for c in facets)) if self.spec.facet_x else 1
         n_rows = (len(facets) + n_cols - 1) // n_cols
-        
-        has_facet_x = bool(self.spec.facet_x)
-        has_facet_y = bool(self.spec.facet_y)
+        has_facet_x, has_facet_y = bool(self.spec.facet_x), bool(self.spec.facet_y)
         
         if has_facet_x and has_facet_y:
             self.layout_widget.setFixedSize(n_cols * self.cell_size, n_rows * self.cell_size)
         elif has_facet_x:
             self.layout_widget.setFixedWidth(n_cols * self.cell_size)
-            self.layout_widget.setMinimumHeight(0)
-            self.layout_widget.setMaximumHeight(16777215)
+            self.layout_widget.setMinimumHeight(0); self.layout_widget.setMaximumHeight(16777215)
         elif has_facet_y:
             self.layout_widget.setFixedHeight(n_rows * self.cell_size)
-            self.layout_widget.setMinimumWidth(0)
-            self.layout_widget.setMaximumWidth(16777215)
+            self.layout_widget.setMinimumWidth(0); self.layout_widget.setMaximumWidth(16777215)
         else:
-            self.layout_widget.setMinimumSize(0, 0)
-            self.layout_widget.setMaximumSize(16777215, 16777215)
+            self.layout_widget.setMinimumSize(0, 0); self.layout_widget.setMaximumSize(16777215, 16777215)
         
         w = self.layout_widget.width()
-        self.btn_reset.move(w - 105, 10)
-        self.btn_rect.move(w - 70, 10)
-        self.btn_float_up.move(w - 35, 10)
-        self.btn_float_down.move(w - 35, 45)
+        self.btn_reset.move(w - 105, 10); self.btn_rect.move(w - 70, 10)
+        self.btn_float_up.move(w - 35, 10); self.btn_float_down.move(w - 35, 45)
 
-        global_legends = {}
-        warnings = []
-        has_float = False
+        global_legends, warnings, has_float = {}, [], False
         
         for i, (fy_val, fx_val) in enumerate(facets):
-            row = i // n_cols
-            col = i % n_cols
-            
+            row, col = i // n_cols, i % n_cols
             pi = self.layout_widget.addPlot(row=row, col=col)
             pi.showGrid(x=True, y=True, alpha=0.3)
+            
+            # 注入自定义倾斜 X 轴
+            axis = AngledAxisItem(orientation='bottom')
+            pi.setAxisItems({'bottom': axis})
             
             has_left = any(s.axis == AxisSlot.LEFT for s in self.spec.series)
             has_right = any(s.axis == AxisSlot.RIGHT for s in self.spec.series)
 
             if row > 0: pi.getAxis("bottom").setStyle(showValues=False)
             if col > 0: pi.getAxis("left").setStyle(showValues=False)
-            
             pi.showAxis("left", has_left and col == 0)
             pi.showAxis("right", has_right and col == n_cols - 1)
             
@@ -375,9 +360,7 @@ class PlotCanvas(QWidget):
             
             cell = {"plot_item": pi, "right_vb": rvb, "floating_vbs": [], "rendered": []}
             self.cells.append(cell)
-            
             pi.vb.sigResized.connect(lambda *args, c=cell: self._sync_cell_vb(c))
-            
             if i > 0: pi.setXLink(self.cells[0]["plot_item"])
 
             sub_df = df
@@ -391,15 +374,14 @@ class PlotCanvas(QWidget):
 
             bar_seen = {AxisSlot.LEFT: 0, AxisSlot.RIGHT: 0, AxisSlot.FLOATING: 0}
             left_y, right_y = None, None
-
             valid_hover_fields = {}
+
             for hf, h_agg in self.spec.hover_fields.items():
                 if hf in sub_df.columns:
                     h_agg_name = h_agg.value if hasattr(h_agg, "value") else str(h_agg)
                     if not pd.api.types.is_numeric_dtype(sub_df[hf]) and h_agg_name in ["mean", "sum", "var", "std"]:
                         msg = f"悬停字段 '{hf}' 为文本，不支持 '{h_agg_name}' 聚合，已忽略。"
-                        if msg not in warnings:
-                            warnings.append(msg)
+                        if msg not in warnings: warnings.append(msg)
                     else:
                         valid_hover_fields[hf] = h_agg
 
@@ -411,8 +393,7 @@ class PlotCanvas(QWidget):
                     agg_name = s.agg.value if hasattr(s.agg, "value") else str(s.agg)
                     if not is_y_numeric and agg_name != "count":
                         msg = f"Y序列 '{s.y}' 为文本，不支持 '{agg_name}' 聚合，该序列未绘制。"
-                        if msg not in warnings:
-                            warnings.append(msg)
+                        if msg not in warnings: warnings.append(msg)
                         continue
 
                 series_name = s.y or s.color or f"series_{idx}"
@@ -465,8 +446,7 @@ class PlotCanvas(QWidget):
                 result = renderer.render(pi, vb, s_df, x_col, s, context)
                 if result:
                     if isinstance(result, list): 
-                        for r in result:
-                            r.vb = vb
+                        for r in result: r.vb = vb
                         cell["rendered"].extend(result)
                     else: 
                         result.vb = vb
@@ -479,42 +459,29 @@ class PlotCanvas(QWidget):
                 sr = self._saved_ranges[i]
                 pi.vb.setXRange(sr["main"][0][0], sr["main"][0][1], padding=0)
                 pi.vb.setYRange(sr["main"][1][0], sr["main"][1][1], padding=0)
-                if rvb and sr["right"]:
-                    rvb.setYRange(sr["right"][1][0], sr["right"][1][1], padding=0)
+                if rvb and sr["right"]: rvb.setYRange(sr["right"][1][0], sr["right"][1][1], padding=0)
                 for j, fvb in enumerate(cell["floating_vbs"]):
                     if j < len(sr["floats"]):
                         fr = sr["floats"][j]
                         fvb.setYRange(fr[1][0], fr[1][1], padding=0)
             else:
-                has_drawn_left = False
-                has_drawn_right = False
-                has_drawn_float = False
+                has_drawn_left, has_drawn_right, has_drawn_float = False, False, False
                 for rs in cell["rendered"]:
                     ax = rs.spec.axis
                     if ax == AxisSlot.LEFT and not has_drawn_left:
-                        pi.vb.autoRange(padding=0.05)
-                        has_drawn_left = True
+                        pi.vb.autoRange(padding=0.05); has_drawn_left = True
                     elif ax == AxisSlot.RIGHT and not has_drawn_right and rvb:
-                        rvb.autoRange(padding=0.05)
-                        has_drawn_right = True
+                        rvb.autoRange(padding=0.05); has_drawn_right = True
                     elif ax == AxisSlot.FLOATING and not has_drawn_float:
-                        for fvb in cell["floating_vbs"]:
-                            fvb.autoRange(padding=0.05)
+                        for fvb in cell["floating_vbs"]: fvb.autoRange(padding=0.05)
                         has_drawn_float = True
-                
                 if not has_drawn_left and not has_drawn_right and not has_drawn_float:
                     pi.vb.autoRange(padding=0.05)
-                
             self._sync_cell_vb(cell)
 
         self._save_current_ranges()
-
-        if has_float:
-            self.btn_float_up.show()
-            self.btn_float_down.show()
-        else:
-            self.btn_float_up.hide()
-            self.btn_float_down.hide()
+        if has_float: self.btn_float_up.show(); self.btn_float_down.show()
+        else: self.btn_float_up.hide(); self.btn_float_down.hide()
 
         return [(name, leg) for name, leg in global_legends.items()], warnings
 
@@ -531,97 +498,97 @@ class PlotCanvas(QWidget):
         if not rendered:
             self.tooltip.hide(); return
 
-        best_rs = None
-        best_idx = -1
-        min_px_dist = float('inf')
+        best_rs, best_idx, min_dist = None, -1, float('inf')
 
         for rs in rendered:
             vb = getattr(rs, "vb", None)
             if vb is None: continue
             
-            pt = vb.mapSceneToView(pos)
-            cur_mx, cur_my = pt.x(), pt.y()
-            px_size_x, px_size_y = vb.viewPixelSize()
-            
             if rs.tree is not None:
-                dist, idx = rs.tree.query([cur_mx, cur_my])
-                dx_px = (rs.x[idx] - cur_mx) / px_size_x if px_size_x > 0 else 0
-                dy_px = (rs.y[idx] - cur_my) / px_size_y if px_size_y > 0 else 0
-                px_dist = np.hypot(dx_px, dy_px)
+                pt = vb.mapSceneToView(pos)
+                k = min(50, len(rs.x))
+                dists, idxs = rs.tree.query([pt.x(), pt.y()], k=k)
+                if k == 1: idxs = [idxs]
+                
+                for idx in idxs:
+                    scene_pt = vb.mapViewToScene(QPointF(rs.x[idx], rs.y[idx]))
+                    dx = scene_pt.x() - pos.x()
+                    dy = scene_pt.y() - pos.y()
+                    px_dist = np.hypot(dx, dy)
+                    
+                    if px_dist < min_dist:
+                        min_dist = px_dist
+                        best_rs = rs
+                        best_idx = idx
             elif rs.sorted_x is not None and len(rs.sorted_x) > 0:
-                idx = np.searchsorted(rs.sorted_x, cur_mx)
+                pt = vb.mapSceneToView(pos)
+                idx = np.searchsorted(rs.sorted_x, pt.x())
                 idx = min(max(idx, 0), len(rs.sorted_x) - 1)
-                if idx > 0 and abs(rs.sorted_x[idx-1] - cur_mx) < abs(rs.sorted_x[idx] - cur_mx):
+                if idx > 0 and abs(rs.sorted_x[idx-1] - pt.x()) < abs(rs.sorted_x[idx] - pt.x()):
                     idx -= 1
                 
-                rx, ry = rs.sorted_x[idx], rs.sorted_y[idx]
-                dx_px = (rx - cur_mx) / px_size_x if px_size_x > 0 else 0
-                dy_px = (ry - cur_my) / px_size_y if px_size_y > 0 else 0
+                scene_pt = vb.mapViewToScene(QPointF(rs.sorted_x[idx], rs.sorted_y[idx]))
+                dx = scene_pt.x() - pos.x()
+                dy = scene_pt.y() - pos.y()
+                px_dist = np.hypot(dx, dy)
                 
                 if rs.spec.chart_type == ChartType.BAR:
-                    if abs(dx_px) < 20:
-                        px_dist = abs(dx_px)
-                    else:
-                        px_dist = np.hypot(dx_px, dy_px)
-                else:
-                    px_dist = np.hypot(dx_px, dy_px)
+                    if abs(dx) < 30: px_dist = abs(dx) if abs(dx) > 0 else 0
                     
-            if px_dist < min_px_dist:
-                min_px_dist = px_dist
-                best_rs = rs
-                best_idx = idx
+                if px_dist < min_dist:
+                    min_dist = px_dist
+                    best_rs = rs
+                    best_idx = idx
 
-        if best_rs is not None and min_px_dist < 25:
+        # 阈值 15，贴近鼠标
+        if best_rs is not None and min_dist < HOVER_TOLERANCE_PX:
             row = best_rs.data.iloc[best_idx]
             
-            if "x" in row:
-                x_val = row["x"]
-            elif "x_plot" in row:
-                x_val = row["x_plot"]
-            else:
-                x_val = best_rs.sorted_x[best_idx]
+            if "x" in row: x_val = row["x"]
+            elif "x_plot" in row: x_val = row["x_plot"]
+            else: x_val = best_rs.sorted_x[best_idx]
 
             if self.x_labels is not None:
                 idx_x = int(round(x_val))
                 display_x = self.x_labels[idx_x] if 0 <= idx_x < len(self.x_labels) else str(x_val)
             else:
-                display_x = f"{x_val:.4g}"
+                if isinstance(x_val, pd.Timestamp):
+                    bucket = self.spec.bucket_settings.get(self.spec.x, "不分组")
+                    if bucket == "Y": display_x = x_val.strftime("%Y")
+                    elif bucket == "M": display_x = x_val.strftime("%Y-%m")
+                    elif bucket in ("W", "D"): display_x = x_val.strftime("%Y-%m-%d")
+                    elif bucket == "1H": display_x = x_val.strftime("%Y-%m-%d %H:00")
+                    else: display_x = x_val.strftime("%Y-%m-%d %H:%M:%S")
+                else:
+                    display_x = f"{x_val:.4g}"
 
             x_col_name = self.spec.x or "X"
             lines = [f"<b>{x_col_name} = {display_x}</b>"]
             
             name = best_rs.spec.y or best_rs.spec.chart_type.value
-            if "y" in row:
-                y_val = row["y"]
-            elif "y_plot" in row:
-                y_val = row["y_plot"]
-            else:
-                y_val = row.get(best_rs.spec.y, 0)
+            if "y" in row: y_val = row["y"]
+            elif "y_plot" in row: y_val = row["y_plot"]
+            else: y_val = row.get(best_rs.spec.y, 0)
                 
-            if isinstance(y_val, (float, int, np.number)):
-                y_val_str = f"{y_val:.4g}"
-            else:
-                y_val_str = str(y_val)
+            if isinstance(y_val, (float, int, np.number)): y_val_str = f"{y_val:.4g}"
+            else: y_val_str = str(y_val)
 
             label = name
-            if best_rs.spec.color and "c" in row:
-                label += f" ({row['c']})"
-                
+            if best_rs.spec.color and "c" in row: label += f" ({row['c']})"
             lines.append(f"<b>{label}: {y_val_str}</b>")
             
             for hf in self.spec.hover_fields:
                 if hf in row:
                     val = row[hf]
-                    if isinstance(val, (float, int, np.number)):
-                        val_str = f"{val:.4g}"
-                    else:
-                        val_str = str(val)
+                    if isinstance(val, (float, int, np.number)): val_str = f"{val:.4g}"
+                    else: val_str = str(val)
                     lines.append(f"{hf}: {val_str}")
 
             self.tooltip.setText("<br>".join(lines))
             self.tooltip.adjustSize()
             local = self.layout_widget.mapFromScene(pos)
-            self.tooltip.move(local.x() + 14, local.y() + 14)
+            # 偏移量改为 7，贴近鼠标
+            self.tooltip.move(local.x() + TOOLTIP_OFFSET_X, local.y() + TOOLTIP_OFFSET_Y)
             self.tooltip.show()
         else:
             self.tooltip.hide()

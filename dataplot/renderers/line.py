@@ -38,7 +38,6 @@ class LineRenderer(SeriesRenderer):
         df_temp["x"] = x_vals[mask]
         df_temp["y"] = y[mask]
         
-        # 分桶逻辑
         if series.bin_width > 0 and labels is None:
             df_temp["x"] = (df_temp["x"] // series.bin_width) * series.bin_width
         
@@ -49,6 +48,7 @@ class LineRenderer(SeriesRenderer):
 
         c_map = context.get("color_map") or {}
         default_idx = context.get("index", 0)
+        base_rgb = c_map.get("base_rgb", SERIES_COLORS[default_idx % len(SERIES_COLORS)])
         
         results = []
         unique_colors = df_temp["c"].unique()
@@ -89,16 +89,15 @@ class LineRenderer(SeriesRenderer):
                 y_v = _normalize(y_v)
 
             if series.color:
-                rgb = c_map.get("map", {}).get(c_val, (100, 100, 100))
+                rgb = c_map.get("map", {}).get(c_val, base_rgb)
             else:
-                rgb = c_map.get("base_rgb", SERIES_COLORS[default_idx % len(SERIES_COLORS)])
+                rgb = base_rgb
 
-            # 画折线
+            # 核心修复：加入 connect='finite' 保证含有 NaN 的数据也能跨越连接
             pen = pg.mkPen(rgb, width=2)
-            item = pg.PlotCurveItem(x_v, y_v, pen=pen)
+            item = pg.PlotCurveItem(x_v, y_v, pen=pen, connect='finite')
             viewbox.addItem(item)
 
-            # 如果有大小字段，画出折点气泡
             if series.size and series.size in agg_df:
                 sizes = make_sizes(agg_df, series.size)
                 scatter = pg.ScatterPlotItem(
