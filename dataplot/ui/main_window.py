@@ -32,21 +32,53 @@ except Exception as e:
     MySQLHelper = None
     DB_IMPORT_ERROR = traceback.format_exc()
 
+
+def create_app_icon() -> QIcon:
+    pixmap = QPixmap(256, 256)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setBrush(QColor(30, 41, 59))
+    painter.setPen(Qt.PenStyle.NoPen)
+    painter.drawRoundedRect(16, 16, 224, 224, 48, 48)
+    colors = [QColor(59, 130, 246), QColor(16, 185, 129), QColor(245, 158, 11), QColor(239, 68, 68)]
+    for i, color in enumerate(colors):
+        painter.setBrush(color)
+        x = 48 + i * 44
+        height = (i * 17) % 80 + 60
+        painter.drawRoundedRect(x, 224 - height - 24, 28, height, 8, 8)
+    pen = QPen(QColor(255, 255, 255))
+    pen.setWidth(8)
+    pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+    pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+    painter.setPen(pen)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+    points = [QPoint(48, 140), QPoint(88, 100), QPoint(128, 120), QPoint(168, 60), QPoint(208, 80)]
+    painter.drawPolyline(points)
+    painter.setBrush(QColor(255, 255, 255))
+    painter.setPen(Qt.PenStyle.NoPen)
+    for pt in points:
+        painter.drawEllipse(pt, 10, 10)
+    painter.end()
+    return QIcon(pixmap)
+
+
 class HierarchyList(QListWidget):
     def __init__(self):
         super().__init__()
         self.setDragEnabled(True)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-
+        
     def startDrag(self, supported_actions):
         item = self.currentItem()
         if item is None: return
-
         mime = QMimeData()
         mime.setText(item.text())
         drag = QDrag(self)
         drag.setMimeData(mime)
         drag.exec(Qt.DropAction.CopyAction)
+
+
 class HierarchyDialog(QDialog):
     def __init__(self, fields, current_fields=None, parent=None):
         super().__init__(parent)
@@ -54,9 +86,9 @@ class HierarchyDialog(QDialog):
         self.resize(450, 500)
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("双击左侧字段加入右侧，或选中右侧字段拖拽上下移动来改变层级顺序："))
-
+        
         hbox = QHBoxLayout()
-
+        
         # 左侧：可选字段
         left_lay = QVBoxLayout()
         left_lay.addWidget(QLabel("可选字段"))
@@ -65,7 +97,7 @@ class HierarchyDialog(QDialog):
         self.left_list.itemDoubleClicked.connect(self._add_to_right)
         left_lay.addWidget(self.left_list)
         hbox.addLayout(left_lay)
-
+        
         # 中间：操作按钮
         mid_lay = QVBoxLayout()
         mid_lay.addStretch()
@@ -77,7 +109,7 @@ class HierarchyDialog(QDialog):
         mid_lay.addWidget(btn_remove)
         mid_lay.addStretch()
         hbox.addLayout(mid_lay)
-
+        
         # 右侧：已选层级
         right_lay = QVBoxLayout()
         right_lay.addWidget(QLabel("已选层级 (拖拽排序)"))
@@ -85,9 +117,9 @@ class HierarchyDialog(QDialog):
         self.right_list.setDragDropMode(QListWidget.DragDropMode.InternalMove)
         right_lay.addWidget(self.right_list)
         hbox.addLayout(right_lay)
-
+        
         layout.addLayout(hbox)
-
+        
         # 预填当前层级
         if current_fields:
             for f in current_fields:
@@ -95,7 +127,7 @@ class HierarchyDialog(QDialog):
             for i in reversed(range(self.left_list.count())):
                 if self.left_list.item(i).text() in current_fields:
                     self.left_list.takeItem(i)
-
+        
         btn = QPushButton("确定")
         btn.clicked.connect(self.accept)
         layout.addWidget(btn)
@@ -114,6 +146,7 @@ class HierarchyDialog(QDialog):
             
     def get_fields(self):
         return [self.right_list.item(i).text() for i in range(self.right_list.count())]
+
 
 class HoverChip(QFrame):
     def __init__(self, field, agg, on_remove, on_agg_change, parent=None):
@@ -144,17 +177,21 @@ class HoverChip(QFrame):
         close_btn.clicked.connect(lambda: on_remove(self.field))
         layout.addWidget(close_btn)
 
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("DataPlot")
- 
+        self.setWindowIcon(create_app_icon())
         self.resize(1500, 850)
 
         self.store = DataStore()
         self.spec = ChartSpec()
         self._last_series_count = 0
- 
+        self._current_project_path = None
+        self._is_loading_from_project = False
+        self._is_rebuilding_ui = False  # <-- 新增这句
+
         self.data_source_dialog = None
         if MySQLHelper:
             self.data_source_dialog = DataSourceDialog(MySQLHelper, self)
@@ -188,10 +225,8 @@ class MainWindow(QMainWindow):
         self.btn_add_hier = QPushButton("+ 新建层级")
         self.btn_add_hier.clicked.connect(self._create_hierarchy)
         self.hierarchy_group.addWidget(self.btn_add_hier)
-
         self.hierarchy_list = HierarchyList()
         self.hierarchy_list.itemDoubleClicked.connect(self._edit_hierarchy)
-
         self.hierarchy_list.customContextMenuRequested.connect(self._show_hierarchy_menu)
         self.hierarchy_group.addWidget(self.hierarchy_list)
         left_lay.addWidget(self.hierarchy_group)
@@ -238,7 +273,7 @@ class MainWindow(QMainWindow):
         self.facet_y_combo.fieldDropped.connect(self._on_facet_y)
         facet_row2.addWidget(self.facet_y_combo, 1)
         self.facet_group.addLayout(facet_row2)
-
+        
         size_lay = QHBoxLayout()
         size_lay.addWidget(QLabel("窗口尺寸:"))
         self.cell_size_combo = QComboBox()
@@ -297,12 +332,16 @@ class MainWindow(QMainWindow):
         root.addWidget(self.right_panel)
 
         toolbar = self.addToolBar("主")
+        
+        # 文件菜单增强
         file_menu = QMenu(self)
+        act_new = file_menu.addAction("新建项目...")
+        act_new.triggered.connect(self._new_project)
         act_open = file_menu.addAction("打开项目...")
         act_open.triggered.connect(self._load_project)
         act_save = file_menu.addAction("保存项目...")
         act_save.triggered.connect(self._save_project)
-
+        
         btn_file = QPushButton("文件")
         btn_file.setMenu(file_menu)
         toolbar.addWidget(btn_file)
@@ -314,6 +353,189 @@ class MainWindow(QMainWindow):
         act_source.triggered.connect(self._open_data_source)
 
         self.statusBar().showMessage("就绪")
+    def _new_project(self):
+        if self.store.is_loaded or self.spec.series:
+            reply = QMessageBox.question(
+                self, '确认', '当前工作区有数据或配置，是否先保存当前项目？',
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard | QMessageBox.StandardButton.Cancel
+            )
+            if reply == QMessageBox.StandardButton.Save:
+                self._save_project()
+            elif reply == QMessageBox.StandardButton.Cancel:
+                return
+
+        # 清空所有状态
+        self.store.df = None
+        self.store.source_type = "none"
+        self.store.source_path = ""
+        self.spec = ChartSpec()
+        self.canvas.spec = self.spec
+        self._current_project_path = None
+        self._last_series_count = 0
+
+        # 重置 UI
+        self.field_list.clear()
+        self.hover_combo.clear()
+        self.hierarchy_list.clear()
+        self._refresh_hover_tags()
+        self._last_series_count = 0
+        
+        self.x_combo.combo.blockSignals(True)
+        self.facet_x_combo.combo.blockSignals(True)
+        self.facet_y_combo.combo.blockSignals(True)
+        
+        for combo in [self.x_combo, self.facet_x_combo, self.facet_y_combo]:
+            combo.combo.clear()
+            combo.combo.addItem("")
+            
+        self.x_combo.combo.blockSignals(False)
+        self.facet_x_combo.combo.blockSignals(False)
+        self.facet_y_combo.combo.blockSignals(False)
+
+        self.series_table.clear_all()
+        self.legend_panel.clear()
+        self.legend_panel.finalize()
+        self._update_bucket_ui()
+        
+        self.canvas.render()
+        self.statusBar().showMessage("已新建项目")
+    def _open_data_source(self):
+        if not MySQLHelper:
+            QMessageBox.critical(self, "模块加载失败", f"无法加载 utils.dbManager。\n错误详情:\n{DB_IMPORT_ERROR}")
+            return
+        self.data_source_dialog.show()
+        self.data_source_dialog.raise_()
+        self.data_source_dialog.activateWindow()
+
+    def _on_data_applied(self, df):
+        # print(f"DEBUG: \n========== 主窗口接收到数据 ==========")
+        # print(f"DEBUG: 接收到的数据形状: {df.shape if df is not None else 'None'}")
+        
+        if df is None or df.empty: return
+        
+        df = DataStore.infer_types(df)
+        self.store.df = df
+        self.store.source_type = "db"
+        self.store._refresh_columns()
+        
+        if self._is_loading_from_project:
+            self._is_loading_from_project = False
+            self._refresh_all_ui_from_spec()
+        else:
+            self._refresh_fields_and_cols()
+        self.statusBar().showMessage(f"成功应用数据源: {len(df)} 行 × {len(df.columns)} 列")
+
+    def _refresh_fields_and_cols(self):
+        # 核心修复：先备份当前配置，防止刷新下拉框时被信号清空
+        old_x = self.spec.x
+        old_hier = self.spec.x_hierarchy
+        old_fx = self.spec.facet_x
+        old_fy = self.spec.facet_y
+
+        self.field_list.clear()
+        self.hover_combo.clear()
+        self.spec.hidden_categories.clear()
+        self._refresh_hover_tags()
+        
+        cols = self.store.df.columns.tolist()
+        self.series_table.set_fields(cols)
+        
+        self.x_combo.combo.blockSignals(True)
+        self.facet_x_combo.combo.blockSignals(True)
+        self.facet_y_combo.combo.blockSignals(True)
+        
+        for combo in [self.x_combo, self.facet_x_combo, self.facet_y_combo]:
+            combo.combo.clear()
+            combo.combo.addItem("")
+            combo.combo.addItems(cols)
+            
+        self.x_combo.combo.blockSignals(False)
+        self.facet_x_combo.combo.blockSignals(False)
+        self.facet_y_combo.combo.blockSignals(False)
+
+        # 核心修复：立刻将备份的配置贴回去
+        self.spec.x = old_x
+        self.spec.x_hierarchy = old_hier
+        self.spec.facet_x = old_fx
+        self.spec.facet_y = old_fy
+        
+        # 恢复下拉框的显示状态
+        if self.spec.x_hierarchy:
+            self.x_combo.set_field(" > ".join(self.spec.x_hierarchy))
+        else:
+            self.x_combo.set_field(self.spec.x)
+        self.facet_x_combo.set_field(self.spec.facet_x)
+        self.facet_y_combo.set_field(self.spec.facet_y)
+        
+        for col in cols:
+            w = FieldItemWidget(col, str(self.store.df[col].dtype))
+            w.typeChanged.connect(self._on_type_changed)
+            item = QListWidgetItem()
+            item.setSizeHint(w.sizeHint())
+            self.field_list.addItem(item)
+            self.field_list.setItemWidget(item, w)
+            self.hover_combo.addItem(col)
+
+        completer = self.hover_combo.completer()
+        if completer:
+            completer.setFilterMode(Qt.MatchFlag.MatchContains)
+            completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
+            
+        self._last_series_count = len(self.spec.series)
+        self._update_bucket_ui()
+        self._rerender(reset_view=True)
+
+    def _refresh_all_ui_from_spec(self):
+        self._is_rebuilding_ui = True 
+        try:
+            if self.store.is_loaded:
+                self._refresh_fields_and_cols()
+                
+            self.hierarchy_list.clear()
+            for h in self.spec.hierarchies:
+                if len(h.fields) > 2:
+                    for i in range(2, len(h.fields) + 1):
+                        self.hierarchy_list.addItem(" > ".join(h.fields[:i]))
+                else:
+                    self.hierarchy_list.addItem(h.name)
+                    
+            if self.spec.x_hierarchy:
+                self.x_combo.set_field(" > ".join(self.spec.x_hierarchy))
+            else:
+                self.x_combo.set_field(self.spec.x)
+                
+            self._update_bucket_ui()
+            
+            self.series_table.clear_all()
+            for s in self.spec.series:
+                self.series_table.add_series(s)
+                
+        finally:
+            self._is_rebuilding_ui = False
+
+        if self.store.is_loaded:
+            self._last_series_count = len(self.spec.series)
+            self._rerender(reset_view=True)
+
+    def _load_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "选择数据文件", "", "数据文件 (*.csv *.xlsx *.xls *.pkl)")
+        if not path: return
+        try:
+            df = self.store.load(path)
+            self.store.source_type = "local"
+            self.store.source_path = path
+        except Exception as exc:
+            self.statusBar().showMessage(f"加载失败: {exc}"); return
+            
+        self._refresh_fields_and_cols()
+        self.statusBar().showMessage(f"已加载本地文件 {len(df)} 行")
+
+    def _on_cell_size_changed(self, index):
+        val = self.cell_size_combo.itemData(index)
+        if val:
+            self.canvas.cell_size = val
+            self._rerender(reset_view=False)
+
     def _create_hierarchy(self):
         cols = self.store.df.columns.tolist() if self.store.is_loaded else []
         if not cols:
@@ -328,7 +550,6 @@ class MainWindow(QMainWindow):
                 spec = HierarchySpec(name=name, fields=selected)
                 self.spec.hierarchies.append(spec)
                 
-                # 核心优化：自动按前 N 层拆分，生成多个可拖拽项
                 self.hierarchy_list.clear()
                 for h in self.spec.hierarchies:
                     if len(h.fields) > 2:
@@ -340,18 +561,17 @@ class MainWindow(QMainWindow):
             else:
                 QMessageBox.warning(self, "提示", "请至少选择两个字段建立层级。")
 
-    def _edit_hierarchy(self, item):			
+    def _edit_hierarchy(self, item):
         old_name = item.text()
-        # 因为列表里可能是截断的层级（如 "A > B" 取自 "A > B > C"），先找到原层级
         target_fields = old_name.split(" > ")
         old_spec = None
         for h in self.spec.hierarchies:
             if h.fields[:len(target_fields)] == target_fields:
                 old_spec = h
                 break
-
+                
         if not old_spec: return
-
+        
         cols = self.store.df.columns.tolist()
         dialog = HierarchyDialog(cols, current_fields=old_spec.fields, parent=self)
         if dialog.exec():
@@ -359,8 +579,7 @@ class MainWindow(QMainWindow):
             if len(selected) >= 2:
                 old_spec.fields = selected
                 old_spec.name = " > ".join(selected)
-
-                # 重建左侧列表
+                
                 self.hierarchy_list.clear()
                 for h in self.spec.hierarchies:
                     if len(h.fields) > 2:
@@ -368,13 +587,14 @@ class MainWindow(QMainWindow):
                             self.hierarchy_list.addItem(" > ".join(h.fields[:i]))
                     else:
                         self.hierarchy_list.addItem(h.name)
-
+                        
                 if self.spec.x_hierarchy and self.spec.x_hierarchy[:len(target_fields)] == target_fields:
                     self.spec.x_hierarchy = selected
                     self.x_combo.set_field(old_spec.name)
                 self._rerender(reset_view=True)
             else:
                 QMessageBox.warning(self, "提示", "请至少选择两个字段建立层级。")
+
     def _show_hierarchy_menu(self, pos):
         item = self.hierarchy_list.itemAt(pos)
         if not item: return
@@ -401,8 +621,11 @@ class MainWindow(QMainWindow):
                 while item.layout().count():
                     sub = item.layout().takeAt(0)
                     if sub.widget(): sub.widget().deleteLater()
-        target_cols = []
 
+        if not self.store.is_loaded:
+            return
+
+        target_cols = []
         if self.spec.x_hierarchy: target_cols.extend(self.spec.x_hierarchy)
         elif self.spec.x: target_cols.append(self.spec.x)
 
@@ -418,6 +641,7 @@ class MainWindow(QMainWindow):
                     lbl = QLabel(f"{col}:")
                     lbl.setFixedWidth(80)
                     h.addWidget(lbl)
+                    
                     if is_dt:
                         inp = QComboBox()
                         inp.addItems(["不分组", "1H", "1D", "W", "M", "Y"])
@@ -426,13 +650,14 @@ class MainWindow(QMainWindow):
                         inp.currentTextChanged.connect(lambda text, c=col: self._set_bucket(c, "" if text == "不分组" else text))
                         h.addWidget(inp)
                     else:
-                        # 数值类型依然输入数字
                         inp = QLineEdit()
                         inp.setPlaceholderText("0 (不分桶)")
                         inp.setText(self.spec.bucket_settings.get(col, "0"))
                         inp.editingFinished.connect(lambda c=col, i=inp: self._set_bucket(c, i.text()))
                         h.addWidget(inp)
+                        
                     self.bucket_layout.addLayout(h)
+                    
         if not has_bucket:
             self.bucket_layout.addWidget(QLabel("当前 X 轴（或层级）没有可用的数值/时间字段。"))
 
@@ -441,24 +666,28 @@ class MainWindow(QMainWindow):
             self.spec.bucket_settings[col] = text
             self._rerender(reset_view=True)
 
-    # ==================== 保存与加载项目 ====================
-
     def _save_project(self):
         path, _ = QFileDialog.getSaveFileName(self, "保存项目", "", "DataPlot 项目 (*.dpj)")
         if not path: return
         
-        # 1. 序列化 Spec (将枚举转成字符串)
         spec_dict = asdict(self.spec)
-        # asdict 会自动把 enum 转成值，但 set 类型需要特殊处理
         spec_dict["hidden_categories"] = list(self.spec.hidden_categories)
         
-        # 2. 序列化数据源状态
-        data_source = {
-            "type": getattr(self.store, 'source_type', 'none'),
-            "path": getattr(self.store, 'source_path', ''),
-            "script": self.data_source_dialog.editor.toPlainText() if self.data_source_dialog else ""
-        }
+        py_script = self.data_source_dialog.saved_py_code if self.data_source_dialog else ""
+        sql_script = self.data_source_dialog.saved_sql_code if self.data_source_dialog else ""
+        
+        # 核心修复：只要代码区有脚本，强制将来源标记为 db
+        src_type = self.store.source_type
+        if py_script.strip() or sql_script.strip():
+            src_type = "db"
 
+        data_source = {
+            "type": src_type,
+            "path": getattr(self.store, 'source_path', ''),
+            "py_script": py_script,
+            "sql_script": sql_script
+        }
+        
         project = {
             "version": "1.0",
             "spec": spec_dict,
@@ -472,14 +701,8 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"项目已保存至: {path}")
 
     def _parse_spec_from_dict(self, data: dict) -> ChartSpec:
-        """将 JSON 字典安全地还原为 dataclass 和 Enum 实例"""
-        from dataplot.core.spec import (
-            ChartSpec, AggType, HierarchySpec, SeriesSpec, AxisSlot, ChartType, ColorTheme, HistogramMode
-        )
-        
         series_list = []
         for s_dict in data.get("series", []):
-            # 核心：将保存的字符串重新转为 Enum 枚举
             s_dict['chart_type'] = ChartType(s_dict.get('chart_type', 'scatter'))
             s_dict['axis'] = AxisSlot(s_dict.get('axis', 'left'))
             s_dict['agg'] = AggType(s_dict.get('agg', 'sum'))
@@ -523,21 +746,41 @@ class MainWindow(QMainWindow):
             data_source = project.get("data_source", {})
             spec_dict = project.get("spec", {})
             
-            # 1. 恢复数据源
-            if data_source.get("type") == "local" and os.path.exists(data_source.get("path", "")):
-                self.store.load(data_source["path"])
-                self.store.source_type = "local"
-                self.store.source_path = data_source.get("path")
-            elif data_source.get("type") == "db":
-                if self.data_source_dialog:
-                    self.data_source_dialog.editor.setPlainText(data_source.get("script", ""))
-                    self.data_source_dialog._execute()
-            
-            # 2. 恢复 Spec（使用安全的解析方法）
             self.spec = self._parse_spec_from_dict(spec_dict)
             
-            # 3. 刷新 UI
-            self._refresh_all_ui_from_spec()
+            py_s = data_source.get("py_script", "")
+            sql_s = data_source.get("sql_script", "")
+            
+            # 核心修复：只要脚本非空，绝对优先走异步加载
+            if py_s.strip() or sql_s.strip():
+                if self.data_source_dialog:
+                    self.data_source_dialog.saved_py_code = py_s
+                    self.data_source_dialog.saved_sql_code = sql_s
+                    
+                    # 核心修复：根据非空的脚本来决定使用哪种模式
+                    if sql_s.strip() and not py_s.strip():
+                        # 切换到 SQL 模式（会自动将 sql_s 填入编辑器）
+                        self.data_source_dialog.mode_combo.setCurrentText("SQL")
+                    else:
+                        # 切换到 Python 模式（会自动将 py_s 填入编辑器）
+                        self.data_source_dialog.mode_combo.setCurrentText("Python")
+                        
+                    self._is_loading_from_project = True
+                    # 开启自动应用，这样 SQL 异步跑完就会自动传给主窗口
+                    self.data_source_dialog.auto_apply = True
+                    self.data_source_dialog._execute()
+            elif data_source.get("type") == "local":
+                file_path = data_source.get("path", "")
+                if os.path.exists(file_path):
+                    self.store.load(file_path)
+                    self.store.source_type = "local"
+                    self.store.source_path = file_path
+                    self._refresh_all_ui_from_spec()
+                else:
+                    QMessageBox.warning(self, "提示", f"找不到本地数据文件:\n{file_path}")
+            else:
+                self._refresh_all_ui_from_spec()
+            
             self.statusBar().showMessage(f"项目已加载: {path}")
             self._current_project_path = path
             
@@ -546,105 +789,9 @@ class MainWindow(QMainWindow):
             err = traceback.format_exc()
             QMessageBox.critical(self, "错误", f"加载项目失败:\n{err}")
 
-    def _refresh_all_ui_from_spec(self):
-        # 重建字段列表
-        if self.store.is_loaded:
-            self._refresh_fields_and_cols()
-            
-        # 重建层级
-        self.hierarchy_list.clear()
-        for h in self.spec.hierarchies:
-            self.hierarchy_list.addItem(h.name)
-            
-        # 恢复 X 轴
-        if self.spec.x_hierarchy:
-            self.x_combo.set_field(" > ".join(self.spec.x_hierarchy))
-        else:
-            self.x_combo.set_field(self.spec.x)
-            
-        # 恢复分桶 UI
-        self._update_bucket_ui()
-        
-        # 恢复 Y 序列
-        self.series_table.clear_all()
-        for s in self.spec.series:
-            self.series_table.add_series(s)
-            
-        self._rerender(reset_view=True)
-
-    # ==================== 数据与信号绑定 ====================
-
-    def _open_data_source(self):
-        if not MySQLHelper:
-            QMessageBox.critical(self, "模块加载失败", f"无法加载 utils.dbManager。\n错误详情:\n{DB_IMPORT_ERROR}")
-            return
-        self.data_source_dialog.show()
-        self.data_source_dialog.raise_()
-        self.data_source_dialog.activateWindow()
-
-    def _on_data_applied(self, df):
-        if df is None or df.empty: return
-        df = DataStore.infer_types(df)
-        self.store.df = df
-        self.store._refresh_columns()
-        self._refresh_fields_and_cols()
-        self.statusBar().showMessage(f"成功应用数据源: {len(df)} 行 × {len(df.columns)} 列")
-
-    def _refresh_fields_and_cols(self):
-        self.field_list.clear()
-        self.hover_combo.clear()
-        self.spec.hidden_categories.clear()
-        self._refresh_hover_tags()
-        
-        cols = self.store.df.columns.tolist()
-        self.series_table.set_fields(cols)
-        
-        for combo in [self.x_combo, self.facet_x_combo, self.facet_y_combo]:
-            combo.combo.blockSignals(True)
-            combo.combo.clear()
-            combo.combo.addItem("")
-            combo.combo.addItems(cols)
-            combo.combo.blockSignals(False)
-        
-        for col in cols:
-            w = FieldItemWidget(col, str(self.store.df[col].dtype))
-            w.typeChanged.connect(self._on_type_changed)
-            item = QListWidgetItem()
-            item.setSizeHint(w.sizeHint())
-            self.field_list.addItem(item)
-            self.field_list.setItemWidget(item, w)
-            self.hover_combo.addItem(col)
-
-        completer = self.hover_combo.completer()
-        if completer:
-            completer.setFilterMode(Qt.MatchFlag.MatchContains)
-            completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
-            
-        self._last_series_count = len(self.spec.series)
-        self._update_bucket_ui()
-        self._rerender(reset_view=True)
-
-    def _load_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "选择数据文件", "", "数据文件 (*.csv *.xlsx *.xls *.pkl)")
-        if not path: return
-        try:
-            df = self.store.load(path)
-            self.store.source_type = "local"
-            self.store.source_path = path
-        except Exception as exc:
-            self.statusBar().showMessage(f"加载失败: {exc}"); return
-            
-        self._refresh_fields_and_cols()
-        self.statusBar().showMessage(f"已加载本地文件 {len(df)} 行")
-
-    def _on_cell_size_changed(self, index):
-        val = self.cell_size_combo.itemData(index)
-        if val:
-            self.canvas.cell_size = val
-            self._rerender(reset_view=False)
-
     def _on_x(self, field: str):
-        # 判断是否是层级字段
+        if getattr(self, '_is_rebuilding_ui', False):
+            return  # 核心修复：重建界面时忽略这个信号
         is_hier = False
         for h in self.spec.hierarchies:
             if h.name == field:
@@ -661,20 +808,26 @@ class MainWindow(QMainWindow):
         self._rerender(reset_view=True)
 
     def _on_facet_x(self, field: str):
+        if getattr(self, '_is_rebuilding_ui', False):
+            return
         self.spec.facet_x = field or None
         self._rerender(reset_view=True)
         
     def _on_facet_y(self, field: str):
+        if getattr(self, '_is_rebuilding_ui', False):
+            return
         self.spec.facet_y = field or None
         self._rerender(reset_view=True)
 
     def _on_series_changed(self):
+        if getattr(self, '_is_rebuilding_ui', False):
+            return  # <-- 核心修复：在重建界面时，忽略信号
         self.spec.series = self.series_table.specs()
         current_count = len(self.spec.series)
         
         if current_count > self._last_series_count:
             self._last_series_count = current_count
-            self._rerender(reset_view=True)
+            self._rerender(reset_view=False)
         else:
             self._last_series_count = current_count
             self._rerender(reset_view=False)
@@ -726,9 +879,11 @@ class MainWindow(QMainWindow):
         self.hover_tags_layout.addStretch()
 
     def _rerender(self, reset_view=False):
+        # 核心修复：每次重绘前，强制把最新的 spec 同步给画布，防止对象脱钩
+        self.canvas.spec = self.spec
+        
         warnings = []
         
-        # 核心修复：层级模式下强制聚合，并同步 UI
         if self.spec.x_hierarchy:
             for row in self.series_table._rows:
                 if row.spec.agg == AggType.NONE:
@@ -747,7 +902,6 @@ class MainWindow(QMainWindow):
             for hf, ha in self.spec.hover_fields.items():
                 if ha == AggType.NONE:
                     self.spec.hover_fields[hf] = AggType.COUNT
-                    # 同步更新界面上的 HoverChip
                     for i in range(self.hover_tags_layout.count()):
                         w = self.hover_tags_layout.itemAt(i).widget()
                         if isinstance(w, HoverChip) and w.field == hf:
@@ -762,7 +916,6 @@ class MainWindow(QMainWindow):
         warnings.extend(canvas_warnings)
         
         if warnings:
-            # 去重后显示在状态栏
             self.statusBar().showMessage("提示: " + " | ".join(list(set(warnings))))
         else:
             self.statusBar().showMessage("就绪")

@@ -199,13 +199,29 @@ class PlotCanvas(QWidget):
             if y_min == y_max: y_min -= 1; y_max += 1
                 
             pi = cell["plot_item"]
-            pi.vb.setXRange(x_min, x_max, padding=0.05)
-            if target_spec.axis == AxisSlot.LEFT:
-                pi.vb.setYRange(y_min, y_max, padding=0.05)
-            elif target_spec.axis == AxisSlot.RIGHT:
-                if cell["right_vb"]: cell["right_vb"].setYRange(y_min, y_max, padding=0.05)
+            cur_y = pi.vb.viewRange()[1]  # 暂存当前的左轴Y范围
+            
+            #下面备注部分是原来的代码
+            if target_spec.axis == AxisSlot.RIGHT:
+                # 核心修复：仅改变 X 轴和右轴，强行锁定左轴 Y 范围
+                pi.vb.setRange(xRange=(x_min, x_max), yRange=cur_y, padding=0.05)
+                if cell["right_vb"]: 
+                    cell["right_vb"].setYRange(y_min, y_max, padding=0.05)
+            elif target_spec.axis == AxisSlot.LEFT:
+                # 改变 X 轴和左轴
+                pi.vb.setRange(xRange=(x_min, x_max), yRange=(y_min, y_max), padding=0.05)
             else:
-                for fvb in cell["floating_vbs"]: fvb.setYRange(y_min, y_max, padding=0.05)
+                # 仅改变 X 轴和浮动轴，强行锁定左轴 Y 范围
+                pi.vb.setRange(xRange=(x_min, x_max), yRange=cur_y, padding=0.05)
+                for fvb in cell["floating_vbs"]: 
+                    fvb.setYRange(y_min, y_max, padding=0.05)
+            # pi.vb.setXRange(x_min, x_max, padding=0.05)
+            # if target_spec.axis == AxisSlot.LEFT:
+            #     pi.vb.setYRange(y_min, y_max, padding=0.05)
+            # elif target_spec.axis == AxisSlot.RIGHT:
+            #     if cell["right_vb"]: cell["right_vb"].setYRange(y_min, y_max, padding=0.05)
+            # else:
+            #     for fvb in cell["floating_vbs"]: fvb.setYRange(y_min, y_max, padding=0.05)
         self._save_current_ranges()
 
     def _toggle_rect_mode(self):
@@ -278,7 +294,11 @@ class PlotCanvas(QWidget):
         return df
 
     def render(self, reset_view=False):
-        if not self.store.is_loaded: return [], []
+        print("\n>>> DEBUG: 进入 PlotCanvas.render")
+        if not self.store.is_loaded:
+            print(">>> DEBUG: store 未加载，直接返回")
+            return [], []
+        # if not self.store.is_loaded: return [], []
 
         if not reset_view: self._save_current_ranges()
         else: self._saved_ranges = None
@@ -289,6 +309,8 @@ class PlotCanvas(QWidget):
         df = self._process_data(self.store.df.copy())
         x_col = self.spec.x
         self.x_labels = None
+        print(f">>> DEBUG: 画布 X 字段: {x_col}")
+        print(f">>> DEBUG: 画布数据列: {df.columns.tolist()[:10]}")
         if x_col and x_col in df.columns:
             from dataplot.renderers.base import get_x_values
             _, labels = get_x_values(df, x_col)
@@ -386,7 +408,8 @@ class PlotCanvas(QWidget):
                         valid_hover_fields[hf] = h_agg
 
             for idx, s in enumerate(self.spec.series):
-                if s.chart_type != ChartType.HISTOGRAM and s.y is None: continue
+                if s.chart_type != ChartType.HISTOGRAM and s.y is None: 
+                    continue
                 
                 if s.chart_type != ChartType.HISTOGRAM and s.y:
                     is_y_numeric = pd.api.types.is_numeric_dtype(sub_df[s.y])
@@ -457,13 +480,26 @@ class PlotCanvas(QWidget):
 
             if self._saved_ranges and i < len(self._saved_ranges):
                 sr = self._saved_ranges[i]
-                pi.vb.setXRange(sr["main"][0][0], sr["main"][0][1], padding=0)
-                pi.vb.setYRange(sr["main"][1][0], sr["main"][1][1], padding=0)
-                if rvb and sr["right"]: rvb.setYRange(sr["right"][1][0], sr["right"][1][1], padding=0)
+                # 核心修复：使用 setRange 同时锁定 X 和 Y，防止 pyqtgraph 内部触发联动适应
+                if sr["main"]:
+                    pi.vb.setRange(
+                        xRange=(sr["main"][0][0], sr["main"][0][1]), 
+                        yRange=(sr["main"][1][0], sr["main"][1][1]), 
+                        padding=0
+                    )
+                
+                if rvb and sr.get("right"):
+                    rvb.setYRange(sr["right"][1][0], sr["right"][1][1], padding=0)
+                elif rvb and has_right and not sr.get("right"):
+                    rvb.autoRange(padding=0.05)  # 新加的右轴自动适应
+                
                 for j, fvb in enumerate(cell["floating_vbs"]):
-                    if j < len(sr["floats"]):
+                    if sr.get("floats") and j < len(sr["floats"]):
                         fr = sr["floats"][j]
                         fvb.setYRange(fr[1][0], fr[1][1], padding=0)
+                    elif not sr.get("floats") or j >= len(sr["floats"]):
+                        fvb.autoRange(padding=0.05)  # 新加的浮动轴自动适应
+                        
             else:
                 has_drawn_left, has_drawn_right, has_drawn_float = False, False, False
                 for rs in cell["rendered"]:
@@ -477,6 +513,7 @@ class PlotCanvas(QWidget):
                         has_drawn_float = True
                 if not has_drawn_left and not has_drawn_right and not has_drawn_float:
                     pi.vb.autoRange(padding=0.05)
+
             self._sync_cell_vb(cell)
 
         self._save_current_ranges()

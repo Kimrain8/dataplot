@@ -38,38 +38,70 @@ def series_default_brush(index: int):
     return pg.mkBrush(*rgb, 170), rgb
 
 
+def _interpolate_color(theme_colors: list[tuple[int,int,int]], t: float) -> tuple[int, int, int]:
+    n = len(theme_colors)
+    if n == 1: return theme_colors[0]
+    pos = t * (n - 1)
+    idx = int(pos)
+    if idx >= n - 1: return theme_colors[-1]
+    frac = pos - idx
+    c1, c2 = theme_colors[idx], theme_colors[idx+1]
+    return (
+        int(c1[0] + (c2[0] - c1[0]) * frac),
+        int(c1[1] + (c2[1] - c1[1]) * frac),
+        int(c1[2] + (c2[2] - c1[2]) * frac)
+    )
+
+
 def get_color_mapping(df: pd.DataFrame, color_col: str | None, theme_name: str = "default"):
     if not color_col or color_col not in df.columns:
         return None, None
         
     theme_colors = THEME_CMAPS.get(theme_name, THEME_CMAPS["default"])
-    n_points = len(theme_colors)
-    positions = np.linspace(0, 1, n_points)
-    cmap = pg.ColorMap(positions, theme_colors)
+    cmap = pg.ColorMap(np.linspace(0, 1, len(theme_colors)), theme_colors)
     
     series = df[color_col]
     if pd.api.types.is_numeric_dtype(series):
         vals = _fill_median(series.to_numpy(dtype=float))
         vmin, vmax = float(vals.min()), float(vals.max())
         c_map = {"type": "continuous", "vmin": vmin, "vmax": vmax, "cmap": cmap}
-        return c_map, ColorLegend(color_col, "continuous", vmin=vmin, vmax=vmax)
+        
+        # 数值型生成 20 个区间的图例
+        entries = []
+        for i in range(20):
+            v0 = vmin + (vmax - vmin) * (i / 20)
+            v1 = vmin + (vmax - vmin) * ((i + 1) / 20)
+            mid_t = (i + 0.5) / 20
+            rgb = _interpolate_color(theme_colors, mid_t)
+            entries.append((f"{v0:.4g} ~ {v1:.4g}", rgb))
+            
+        return c_map, ColorLegend(color_col, "categorical", entries=entries)
     else:
         filled = series.astype("object").where(series.notna(), "<缺失>").astype(str)
         uniques = filled.unique()
         n = len(uniques)
         if n == 0: return None, None
         
-        # 核心修复：预先生成完全确定的调色盘映射表，确保画布和图例 100% 一致
-        lut = cmap.getLookupTable(nPts=max(n, 2), alpha=False)
-        
         color_dict = {}
-        entries = []
         for i, u in enumerate(uniques):
-            idx = int(i / max(1, n - 1) * (len(lut) - 1)) if n > 1 else 0
-            rgb = tuple(int(c) for c in lut[idx][:3])
+            t = i / max(1, n - 1) if n > 1 else 0.5
+            rgb = _interpolate_color(theme_colors, t)
             color_dict[u] = rgb
-            entries.append((str(u), rgb))
             
+        entries = []
+        if n <= 20:
+            for i, u in enumerate(uniques):
+                entries.append((str(u), color_dict[u]))
+        else:
+            # 类别型合并为 20 个区间
+            for i in range(20):
+                start_idx = int(i * n / 20)
+                end_idx = int((i + 1) * n / 20) - 1
+                if end_idx >= n: end_idx = n - 1
+                mid_idx = (start_idx + end_idx) // 2
+                rgb = color_dict[uniques[mid_idx]]
+                entries.append((f"{uniques[start_idx]} ~ {uniques[end_idx]}", rgb))
+                
         c_map = {"type": "categorical", "map": color_dict}
         return c_map, ColorLegend(color_col, "categorical", entries=entries)
 

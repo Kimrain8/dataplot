@@ -16,6 +16,8 @@ mysql-connector-python = "*"
 pycryptodome = "*"
 cryptography = "*"
 pyinstaller = "*"
+requests = "*"
+websocket-client = "*"
 
 [dev-packages]
 

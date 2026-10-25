@@ -43,32 +43,29 @@ class LegendPanel(QWidget):
         title.clicked.connect(lambda: self.legendToggled.emit(series_name, ""))
         lay.addWidget(title)
 
-        if legend.kind == "categorical":
-            for name, rgb in legend.entries[:40]:
-                row = QHBoxLayout()
-                row.setSpacing(4)
+        for name, rgb in legend.entries:
+            row = QHBoxLayout()
+            row.setSpacing(4)
+            
+            is_cat_hidden = f"{series_name}||{name}" in hidden_categories or is_series_hidden
+            
+            sw = QLabel()
+            sw.setFixedSize(12, 12)
+            if is_cat_hidden:
+                sw.setStyleSheet("background-color: #d1d5db; border: 1px solid #999;")
+            else:
+                r, g, b = int(rgb[0]), int(rgb[1]), int(rgb[2])
+                sw.setStyleSheet(f"background-color: rgb({r},{g},{b}); border: 1px solid #333;")
                 
-                is_cat_hidden = f"{series_name}||{name}" in hidden_categories or is_series_hidden
-                # 核心修复：画布使用了 alpha=170 (约0.66)，图例也必须保持一致的透明度
-                opacity = "0.2" if is_cat_hidden else "0.66"
-                
-                sw = QLabel()
-                sw.setFixedSize(12, 12)
-                sw.setStyleSheet(f"background: rgba({rgb[0]},{rgb[1]},{rgb[2]},{opacity}); border: 1px solid #333;")
-                row.addWidget(sw)
-                
-                lbl = ClickableLabel(str(name))
-                lbl.setStyleSheet(f"font-size: 11px; color: {'#aaa' if is_cat_hidden else '#000'};")
-                lbl.clicked.connect(lambda n=name: self.legendToggled.emit(series_name, n))
-                row.addWidget(lbl)
-                
-                row.addStretch()
-                lay.addLayout(row)
-        elif legend.kind == "continuous":
-            grad = QLabel()
-            grad.setFixedHeight(10)
-            grad.setStyleSheet("background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 rgb(60,130,220), stop:0.5 rgb(240,200,80), stop:1 rgb(220,70,70));")
-            lay.addWidget(grad)
+            row.addWidget(sw)
+            
+            lbl = ClickableLabel(str(name))
+            lbl.setStyleSheet(f"font-size: 11px; color: {'#aaa' if is_cat_hidden else '#000'};")
+            lbl.clicked.connect(lambda n=name: self.legendToggled.emit(series_name, n))
+            row.addWidget(lbl)
+            
+            row.addStretch()
+            lay.addLayout(row)
             
         self._layout.addWidget(block)
 

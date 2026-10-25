@@ -7,6 +7,8 @@ class DataStore:
         self.df: pd.DataFrame | None = None
         self.numeric_cols: list[str] = []
         self.categorical_cols: list[str] = []
+        self.source_type = "none"  # 核心：记录数据来源（local 或 db）
+        self.source_path = ""
 
     def load(self, path: str) -> pd.DataFrame:
         if path.endswith(".pkl"):
@@ -32,7 +34,6 @@ class DataStore:
 
     @staticmethod
     def infer_types(df: pd.DataFrame) -> pd.DataFrame:
-        """按规则推断：前导0保护、严格日期、包含小数转float、变长整数转float"""
         df = df.copy()
         for col in df.columns:
             if df[col].dtype != 'object':
@@ -52,11 +53,7 @@ class DataStore:
                 continue
 
             # 规则 2：严格日期/时间格式
-            # 必须包含两个 - 或 /，或者两个 :，并且全部是数字和合法分隔符
-            # 涵盖：yyyy-mm-dd, yy/mm/dd, yyyy-mm-dd hh:mm:ss 等
             date_pattern = r'^\d{2,4}[-/]\d{1,2}[-/]\d{1,2}([ T]\d{1,2}:\d{1,2}(:\d{1,2})?)?$|^\d{1,2}:\d{1,2}(:\d{1,2})?$'
-            
-            # 如果所有非空字符串都完美符合该模式，才尝试转日期
             if valid_strs.str.match(date_pattern).all():
                 try:
                     converted_dt = pd.to_datetime(valid_strs, errors='coerce')

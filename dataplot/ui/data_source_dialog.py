@@ -30,16 +30,11 @@ def get_exe_dir():
 
 BASE_PATH = get_base_path()
 EXE_DIR = get_exe_dir()
-										
-						
-							   
 
 # 缓存文件放在 exe 同级目录，模板放在打包的内部资源目录
 CACHE_FILE = os.path.join(EXE_DIR, ".dataplot_cache.json")
-# CACHE_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".dataplot_cache.json")
 
 class ExecuteWorker(QThread):
-    # ... (保持不变) ...
     finished = Signal(pd.DataFrame, str)
     output = Signal(str)
     mode_detected = Signal(str)
@@ -53,6 +48,8 @@ class ExecuteWorker(QThread):
         self.namespace = namespace
 
     def run(self):
+        print("\n========== 进入 ExecuteWorker.run ==========")
+        print(f"DEBUG: 执行模式: {self.mode}, 数据库: {self.db_name}")
         class StdoutRedirector:
             def __init__(self, signal):
                 self.signal = signal
@@ -97,7 +94,9 @@ class ExecuteWorker(QThread):
 
                 # 尝试实例化连接
                 try:
+                    print(f"DEBUG: 准备实例化 MySQLHelper，config_path={config_path}")
                     self.namespace['db'] = self.db_helper_class(config_path=config_path, db=self.db_name)
+                    print("DEBUG: MySQLHelper 实例化成功！")
                     print(f"✅ 数据库环境已切换至: {self.db_name}")
                 except Exception as e:
                     print(f"❌ 数据库连接失败，配置路径: {config_path}")
@@ -111,6 +110,7 @@ class ExecuteWorker(QThread):
                 exec(self.code, self.namespace)
             else:
                 self.namespace['df'] = self.namespace['db'].qry2df(self.code)
+                print(f"DEBUG: SQL 执行成功，获取数据形状: {self.namespace['df'].shape}")
                 print("✅ SQL 执行成功，结果已保存至变量 `df`。")
 
             df = self.namespace.get('df', pd.DataFrame())
@@ -135,10 +135,13 @@ class DataSourceDialog(QDialog):
         self.resize(1200, 800)
         self.db_helper_class = db_helper_class
         
+        # 新增：用于自动加载项目时自动推送数据
+        self.auto_apply = False
+        
         self._current_mode = "Python"
         self.saved_py_code = ""
         self.saved_sql_code = ""
-        self.saved_db_list = ["jhd","ginger2" ]
+        self.saved_db_list = ["jhd", "ginger2"]
         
         self.global_namespace = {
             'pd': pd,
@@ -151,7 +154,6 @@ class DataSourceDialog(QDialog):
         self._init_from_cache()
 
     def _build_ui(self):
-        # ... (顶部工具栏代码保持不变) ...
         layout = QVBoxLayout(self)
         top_bar = QHBoxLayout()
         top_bar.addWidget(QLabel("执行模式:"))
@@ -190,7 +192,6 @@ class DataSourceDialog(QDialog):
         upper_splitter = QSplitter(Qt.Orientation.Horizontal)
         
         self.editor = CodeEditor()
-        # 关键：把命名空间引用传递给编辑器
         self.editor.set_namespace(self.global_namespace)
         self.editor.execRequested.connect(self._execute)
         self.editor.textChanged.connect(self._auto_save_cache)
@@ -223,7 +224,6 @@ class DataSourceDialog(QDialog):
         self.main_splitter.setSizes([600, 200])
         layout.addWidget(self.main_splitter)
 
-    # ... (其余函数：_init_from_cache, _auto_save_cache, _on_mode_changed, _sync_mode_ui, _restore_template 保持不变) ...
     def _init_from_cache(self):
         py_code = self._read_template("python")
         sql_code = self._read_template("sql")
@@ -258,7 +258,6 @@ class DataSourceDialog(QDialog):
             pass
 
     def _read_template(self, mode):
-        # base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         template_path = os.path.join(BASE_PATH, "templates", f"{mode}_template.{'py' if mode == 'python' else 'sql'}")
         if os.path.exists(template_path):
             with open(template_path, "r", encoding="utf-8") as f:
@@ -300,6 +299,8 @@ class DataSourceDialog(QDialog):
         self._auto_save_cache()
 
     def _execute(self):
+        print("\n========== 进入 DataSourceDialog._execute ==========")
+        print(f"DEBUG: 当前模式: {self._current_mode}, 当前 DB: {self.db_combo.currentText()}")
         cursor = self.editor.textCursor()
         if cursor.hasSelection():
             code = cursor.selectedText().replace('\u2029', '\n')
@@ -310,7 +311,7 @@ class DataSourceDialog(QDialog):
             
         if not code.strip():
             return
-            
+
         self.btn_run.setEnabled(False)
         db_name = self.db_combo.currentText().strip()
         if not db_name: db_name = "jhd"
@@ -326,10 +327,10 @@ class DataSourceDialog(QDialog):
         self.worker.start()
 
     def _on_exec_finished(self, df, err):
+        print("\n========== 进入 _on_exec_finished ==========")
+        print(f"DEBUG: 收到数据形状: {df.shape}, 是否有错误: {bool(err)}")
+        print(f"DEBUG: 当前 auto_apply 状态: {self.auto_apply}")
         self.btn_run.setEnabled(True)
-        
-        # 核心：执行完毕后，通知编辑器命名空间已更新（可能有了新的 df 变量）
-        # 因为引用传递，编辑器里的 namespace 是最新的。但重新设置一次可以刷新补全状态
         self.editor.set_namespace(self.global_namespace)
         
         if err:
@@ -349,19 +350,34 @@ class DataSourceDialog(QDialog):
         else:
             self.table_info.setText(f"总计 {len(df)} 行。可在此直接双击编辑。")
 
+        # 核心修复：如果是自动加载项目触发的执行，跑完立刻推送到主画布
+        if self.auto_apply:
+            self.auto_apply = False
+            self._apply_data()
+
     def _apply_data(self):
-        # ... 保持不变 ...
+        print("\n========== 进入 DataSourceDialog._apply_data ==========")
         if not hasattr(self, 'current_df') or self.current_df is None:
+            print("DEBUG: 错误 - current_df 为空")
             QMessageBox.warning(self, "提示", "请先执行代码获取数据。")
             return
-        if hasattr(self, 'model'):
-            modified_df = self.model.get_dataframe()
-            if len(self.current_df) > 1000:
-                final_df = pd.concat([modified_df, self.current_df.iloc[1000:]]).reset_index(drop=True)
+            
+        try:
+            if hasattr(self, 'model'):
+                modified_df = self.model.get_dataframe()
+                if len(self.current_df) > 1000:
+                    final_df = pd.concat([modified_df, self.current_df.iloc[1000:]]).reset_index(drop=True)
+                else:
+                    final_df = modified_df
             else:
-                final_df = modified_df
-        else:
-            final_df = self.current_df
-        self.global_namespace['df'] = final_df
-        self.data_applied.emit(final_df)
-        self.hide()
+                final_df = self.current_df
+                
+            print(f"DEBUG: 准备通过 emit 发送数据，形状: {final_df.shape}")
+            self.global_namespace['df'] = final_df
+            self.data_applied.emit(final_df)
+            print("DEBUG: emit 信号发送完毕")
+            self.hide()
+        except Exception as e:
+            import traceback
+            err = traceback.format_exc()
+            print(f"❌ _apply_data 发生异常:\n{err}")
