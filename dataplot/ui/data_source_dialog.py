@@ -5,6 +5,8 @@ import json
 import traceback
 import pandas as pd
 import numpy as np
+import requests
+import websocket
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
@@ -14,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from dataplot.ui.code_editor import CodeEditor
 from dataplot.ui.pandas_model import PandasModel
+from dataplot.config import STOCK_API_URL, STOCK_API_TOKEN
 
 # ============ 核心：适配 PyInstaller 打包后的路径 ============
 def get_base_path():
@@ -39,17 +42,18 @@ class ExecuteWorker(QThread):
     output = Signal(str)
     mode_detected = Signal(str)
 
-    def __init__(self, code, mode, db_name, db_helper_class, namespace):
+    def __init__(self, code, mode, source_type, db_name, db_helper_class, namespace):
         super().__init__()
         self.code = code
         self.mode = mode
+        self.source_type = source_type  # 新增：连接方式 (Database/HTTPS/WebSocket)
         self.db_name = db_name
         self.db_helper_class = db_helper_class
         self.namespace = namespace
 
     def run(self):
-        print("\n========== 进入 ExecuteWorker.run ==========")
-        print(f"DEBUG: 执行模式: {self.mode}, 数据库: {self.db_name}")
+        # print("\n========== 进入 ExecuteWorker.run ==========")
+        # print(f"DEBUG: 执行模式: {self.mode}, 连接方式: {self.source_type}, 数据库: {self.db_name}")
         class StdoutRedirector:
             def __init__(self, signal):
                 self.signal = signal
@@ -76,42 +80,91 @@ class ExecuteWorker(QThread):
                 self.output.emit(f"💡 自动识别为 {actual_mode.upper()} 模式。")
                 self.mode_detected.emit(actual_mode)
 
-            current_db = self.namespace.get('db')
-            if current_db is None or getattr(current_db, 'db', None) != self.db_name:
-                default_path = r'D:\pyprj\cv2\utils\config.json'
-                config_path = default_path
-                
-                # 如果默认路径不存在，尝试在当前目录（打包后的 exe 目录或运行目录）找
-                if not os.path.exists(config_path):
-                    if getattr(sys, 'frozen', False):
-                        exe_dir = os.path.dirname(sys.executable)
-                    else:
-                        exe_dir = os.getcwd()
-                    fallback_path = os.path.join(exe_dir, 'config.json')
-                    if os.path.exists(fallback_path):
-                        config_path = fallback_path
-                        print(f"⚠️ 默认配置未找到，已自动回退到当前目录: {config_path}")
-
-                # 尝试实例化连接
-                try:
-                    print(f"DEBUG: 准备实例化 MySQLHelper，config_path={config_path}")
-                    self.namespace['db'] = self.db_helper_class(config_path=config_path, db=self.db_name)
-                    print("DEBUG: MySQLHelper 实例化成功！")
-                    print(f"✅ 数据库环境已切换至: {self.db_name}")
-                except Exception as e:
-                    print(f"❌ 数据库连接失败，配置路径: {config_path}")
-                    print(f"错误详情: {e}")
-                    # 清理单例池中的脏实例，以便下次重试
-                    if hasattr(self.db_helper_class, '_instance_pool') and self.db_name in self.db_helper_class._instance_pool:
-                        del self.db_helper_class._instance_pool[self.db_name]
-                    raise e
-
+            # 核心重构：根据 source_type 区分数据获取逻辑
             if actual_mode == "python":
+                # Python 模式依然保留原有的数据库连接逻辑
+                current_db = self.namespace.get('db')
+                if current_db is None or getattr(current_db, 'db', None) != self.db_name:
+                    default_path = r'D:\pyprj\cv2\utils\config.json'
+                    config_path = default_path
+                    
+                    if not os.path.exists(config_path):
+                        if getattr(sys, 'frozen', False):
+                            exe_dir = os.path.dirname(sys.executable)
+                        else:
+                            exe_dir = os.getcwd()
+                        fallback_path = os.path.join(exe_dir, 'config.json')
+                        if os.path.exists(fallback_path):
+                            config_path = fallback_path
+                            print(f"⚠️ 默认配置未找到，已自动回退到当前目录: {config_path}")
+
+                    try:
+                        # print(f"DEBUG: 准备实例化 MySQLHelper，config_path={config_path}")
+                        self.namespace['db'] = self.db_helper_class(config_path=config_path, db=self.db_name)
+                        # print("DEBUG: MySQLHelper 实例化成功！")
+                        print(f"✅ 数据库环境已切换至: {self.db_name}")
+                    except Exception as e:
+                        print(f"❌ 数据库连接失败，配置路径: {config_path}")
+                        print(f"错误详情: {e}")
+                        if hasattr(self.db_helper_class, '_instance_pool') and self.db_name in self.db_helper_class._instance_pool:
+                            del self.db_helper_class._instance_pool[self.db_name]
+                        raise e
+                
                 exec(self.code, self.namespace)
-            else:
-                self.namespace['df'] = self.namespace['db'].qry2df(self.code)
-                print(f"DEBUG: SQL 执行成功，获取数据形状: {self.namespace['df'].shape}")
-                print("✅ SQL 执行成功，结果已保存至变量 `df`。")
+                
+            else: # SQL 模式
+                if self.source_type == "HTTPS":
+                    print("✅ 正在通过 HTTPS 请求数据...")
+                    url = f"{STOCK_API_URL}/api/query"
+                    headers = {"Authorization": f"Bearer {STOCK_API_TOKEN}"}
+                    payload = {"sql": self.code}
+                    resp = requests.post(url, json=payload, headers=headers, timeout=30)
+                    resp.raise_for_status()
+                    self.namespace['df'] = pd.DataFrame(resp.json())
+                    print(f"DEBUG: HTTPS 请求成功，获取数据形状: {self.namespace['df'].shape}")
+                    
+                elif self.source_type == "WebSocket":
+                    print("✅ 正在通过 WebSocket 请求数据...")
+                    ws_url = STOCK_API_URL.replace("http", "ws") + f"/api/ws?token={STOCK_API_TOKEN}"
+                    ws = websocket.create_connection(ws_url, timeout=30)
+                    ws.send(self.code)
+                    res_data = ws.recv()
+                    ws.close()
+                    data = json.loads(res_data)
+                    if isinstance(data, dict) and "error" in data:
+                        raise ValueError(f"服务端错误: {data['error']}")
+                    self.namespace['df'] = pd.DataFrame(data)
+                    print(f"DEBUG: WebSocket 请求成功，获取数据形状: {self.namespace['df'].shape}")
+                    
+                else: # Database
+                    current_db = self.namespace.get('db')
+                    if current_db is None or getattr(current_db, 'db', None) != self.db_name:
+                        default_path = r'D:\pyprj\cv2\utils\config.json'
+                        config_path = default_path
+                        if not os.path.exists(config_path):
+                            if getattr(sys, 'frozen', False):
+                                exe_dir = os.path.dirname(sys.executable)
+                            else:
+                                exe_dir = os.getcwd()
+                            fallback_path = os.path.join(exe_dir, 'config.json')
+                            if os.path.exists(fallback_path):
+                                config_path = fallback_path
+                                print(f"⚠️ 默认配置未找到，已自动回退到当前目录: {config_path}")
+                        try:
+                            # print(f"DEBUG: 准备实例化 MySQLHelper，config_path={config_path}")
+                            self.namespace['db'] = self.db_helper_class(config_path=config_path, db=self.db_name)
+                            # print("DEBUG: MySQLHelper 实例化成功！")
+                            print(f"✅ 数据库环境已切换至: {self.db_name}")
+                        except Exception as e:
+                            print(f"❌ 数据库连接失败，配置路径: {config_path}")
+                            print(f"错误详情: {e}")
+                            if hasattr(self.db_helper_class, '_instance_pool') and self.db_name in self.db_helper_class._instance_pool:
+                                del self.db_helper_class._instance_pool[self.db_name]
+                            raise e
+                            
+                    self.namespace['df'] = self.namespace['db'].qry2df(self.code)
+                    # print(f"DEBUG: SQL 执行成功，获取数据形状: {self.namespace['df'].shape}")
+                    print("✅ SQL 执行成功，结果已保存至变量 `df`。")
 
             df = self.namespace.get('df', pd.DataFrame())
             if not isinstance(df, pd.DataFrame):
@@ -135,7 +188,7 @@ class DataSourceDialog(QDialog):
         self.resize(1200, 800)
         self.db_helper_class = db_helper_class
         
-        # 新增：用于自动加载项目时自动推送数据
+        # 用于自动加载项目时自动推送数据
         self.auto_apply = False
         
         self._current_mode = "Python"
@@ -162,6 +215,15 @@ class DataSourceDialog(QDialog):
         self.mode_combo.currentTextChanged.connect(self._on_mode_changed)
         top_bar.addWidget(self.mode_combo)
         
+        top_bar.addSpacing(10)
+        
+        # 新增：连接方式下拉框
+        top_bar.addWidget(QLabel("连接方式:"))
+        self.source_combo = QComboBox()
+        self.source_combo.addItems(["Database", "HTTPS", "WebSocket"])
+        self.source_combo.currentTextChanged.connect(self._on_source_changed)
+        top_bar.addWidget(self.source_combo)
+
         top_bar.addSpacing(10)
         top_bar.addWidget(QLabel("数据库:"))
         self.db_combo = QComboBox()
@@ -223,6 +285,10 @@ class DataSourceDialog(QDialog):
         
         self.main_splitter.setSizes([600, 200])
         layout.addWidget(self.main_splitter)
+
+    def _on_source_changed(self, text):
+        # 如果选择了网络模式，禁用数据库下拉框
+        self.db_combo.setEnabled(text == "Database")
 
     def _init_from_cache(self):
         py_code = self._read_template("python")
@@ -299,8 +365,8 @@ class DataSourceDialog(QDialog):
         self._auto_save_cache()
 
     def _execute(self):
-        print("\n========== 进入 DataSourceDialog._execute ==========")
-        print(f"DEBUG: 当前模式: {self._current_mode}, 当前 DB: {self.db_combo.currentText()}")
+        # print("\n========== 进入 DataSourceDialog._execute ==========")
+        # print(f"DEBUG: 当前模式: {self._current_mode}, 连接方式: {self.source_combo.currentText()}, 当前 DB: {self.db_combo.currentText()}")
         cursor = self.editor.textCursor()
         if cursor.hasSelection():
             code = cursor.selectedText().replace('\u2029', '\n')
@@ -320,16 +386,18 @@ class DataSourceDialog(QDialog):
             self.db_combo.addItem(db_name)
             self._auto_save_cache()
         
-        self.worker = ExecuteWorker(code, self._current_mode.lower(), db_name, self.db_helper_class, self.global_namespace)
+        # 核心重构：获取最新的 source_type 并传入 Worker
+        source_type = self.source_combo.currentText()
+        self.worker = ExecuteWorker(code, self._current_mode.lower(), source_type, db_name, self.db_helper_class, self.global_namespace)
         self.worker.output.connect(self.console.append)
         self.worker.mode_detected.connect(self._sync_mode_ui)
         self.worker.finished.connect(self._on_exec_finished)
         self.worker.start()
 
     def _on_exec_finished(self, df, err):
-        print("\n========== 进入 _on_exec_finished ==========")
-        print(f"DEBUG: 收到数据形状: {df.shape}, 是否有错误: {bool(err)}")
-        print(f"DEBUG: 当前 auto_apply 状态: {self.auto_apply}")
+        # print("\n========== 进入 _on_exec_finished ==========")
+        # print(f"DEBUG: 收到数据形状: {df.shape}, 是否有错误: {bool(err)}")
+        # print(f"DEBUG: 当前 auto_apply 状态: {self.auto_apply}")
         self.btn_run.setEnabled(True)
         self.editor.set_namespace(self.global_namespace)
         
@@ -350,15 +418,15 @@ class DataSourceDialog(QDialog):
         else:
             self.table_info.setText(f"总计 {len(df)} 行。可在此直接双击编辑。")
 
-        # 核心修复：如果是自动加载项目触发的执行，跑完立刻推送到主画布
+        # 如果是自动加载项目触发的执行，跑完立刻推送到主画布
         if self.auto_apply:
             self.auto_apply = False
             self._apply_data()
 
     def _apply_data(self):
-        print("\n========== 进入 DataSourceDialog._apply_data ==========")
+        # print("\n========== 进入 DataSourceDialog._apply_data ==========")
         if not hasattr(self, 'current_df') or self.current_df is None:
-            print("DEBUG: 错误 - current_df 为空")
+            # print("DEBUG: 错误 - current_df 为空")
             QMessageBox.warning(self, "提示", "请先执行代码获取数据。")
             return
             
@@ -372,10 +440,10 @@ class DataSourceDialog(QDialog):
             else:
                 final_df = self.current_df
                 
-            print(f"DEBUG: 准备通过 emit 发送数据，形状: {final_df.shape}")
+            # print(f"DEBUG: 准备通过 emit 发送数据，形状: {final_df.shape}")
             self.global_namespace['df'] = final_df
             self.data_applied.emit(final_df)
-            print("DEBUG: emit 信号发送完毕")
+            # print("DEBUG: emit 信号发送完毕")
             self.hide()
         except Exception as e:
             import traceback

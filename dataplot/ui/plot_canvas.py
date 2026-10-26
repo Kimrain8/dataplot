@@ -294,9 +294,9 @@ class PlotCanvas(QWidget):
         return df
 
     def render(self, reset_view=False):
-        print("\n>>> DEBUG: 进入 PlotCanvas.render")
+        # print("\n>>> DEBUG: 进入 PlotCanvas.render")
         if not self.store.is_loaded:
-            print(">>> DEBUG: store 未加载，直接返回")
+            # print(">>> DEBUG: store 未加载，直接返回")
             return [], []
         # if not self.store.is_loaded: return [], []
 
@@ -309,8 +309,8 @@ class PlotCanvas(QWidget):
         df = self._process_data(self.store.df.copy())
         x_col = self.spec.x
         self.x_labels = None
-        print(f">>> DEBUG: 画布 X 字段: {x_col}")
-        print(f">>> DEBUG: 画布数据列: {df.columns.tolist()[:10]}")
+        # print(f">>> DEBUG: 画布 X 字段: {x_col}")
+        # print(f">>> DEBUG: 画布数据列: {df.columns.tolist()[:10]}")
         if x_col and x_col in df.columns:
             from dataplot.renderers.base import get_x_values
             _, labels = get_x_values(df, x_col)

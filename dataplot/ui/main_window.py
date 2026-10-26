@@ -821,13 +821,19 @@ class MainWindow(QMainWindow):
 
     def _on_series_changed(self):
         if getattr(self, '_is_rebuilding_ui', False):
-            return  # <-- 核心修复：在重建界面时，忽略信号
+            return
+            
         self.spec.series = self.series_table.specs()
         current_count = len(self.spec.series)
         
-        if current_count > self._last_series_count:
+        # 核心修复：判断当前是否有有效的 Y 序列，以及画布之前是否渲染出过数据
+        has_valid_y = any(s.y is not None for s in self.spec.series)
+        has_rendered = any(len(cell["rendered"]) > 0 for cell in self.canvas.cells) if hasattr(self.canvas, "cells") else False
+        
+        # 如果新增了序列，或者这是第一次有有效的 Y 数据但画布还是空的，则强制重置视图
+        if current_count > self._last_series_count or (has_valid_y and not has_rendered):
             self._last_series_count = current_count
-            self._rerender(reset_view=False)
+            self._rerender(reset_view=True)  
         else:
             self._last_series_count = current_count
             self._rerender(reset_view=False)
