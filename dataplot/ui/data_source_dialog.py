@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import re
 import json
 import traceback
@@ -16,7 +17,7 @@ from PySide6.QtWidgets import (
 
 from dataplot.ui.code_editor import CodeEditor
 from dataplot.ui.pandas_model import PandasModel
-from dataplot.config import STOCK_API_URL, STOCK_API_TOKEN
+from dataplot.config import STOCK_API_URL, WS_URL, LOGIN_URL,BASE_URL,SESSION_COOKIE
 
 # ============ 核心：适配 PyInstaller 打包后的路径 ============
 def get_base_path():
@@ -36,6 +37,71 @@ EXE_DIR = get_exe_dir()
 
 # 缓存文件放在 exe 同级目录，模板放在打包的内部资源目录
 CACHE_FILE = os.path.join(EXE_DIR, ".dataplot_cache.json")
+SESSION_COOKIE_NAME = SESSION_COOKIE   # 例如 "stock2_session"
+
+class AuthClient:
+    _cache: dict = {"value": None, "time": 0.0}
+    _session: requests.Session | None = None
+    def __init__(self, base_url: str = None, ttl: int = 3600):
+        """
+        :param ttl: 本地缓存秒数。建议 <= 服务端 session 过期时间。
+                    若服务端 session 到期会返回 401，届时调用方应 force=True 重登。
+        """
+        self.base_url = (base_url or BASE_URL).rstrip("/")
+        self.ttl = ttl
+        # self._cache: dict = {"value": None, "time": 0.0}
+        # self._session: requests.Session | None = None   # 复用连接池
+
+    # ---------- 底层：登录并返回带 cookie 的 Session ----------
+    def _login(self) -> requests.Session:
+        s = requests.Session()
+        resp = s.post(f"{LOGIN_URL}",data={"username": 'kim', "password": 'kim168'},timeout=10)
+        resp.raise_for_status()
+        if not s.cookies.get(SESSION_COOKIE_NAME):
+            raise RuntimeError(f"登录成功但无 cookie，cookies={s.cookies.get_dict()}")
+        return s
+
+    # ---------- 对外：获取裸 token（给 WebSocket 等需要 Cookie 头的地方用） ----------
+    def get_token(self, force: bool = False) -> str:
+        """
+        获取 stock2_session 的值。
+        带本地缓存；force=True 时强制重新登录（服务端返回 401 后使用）。
+        """
+        if not force and self._cache["value"] and \
+           (time.time() - self._cache["time"]) < self.ttl:
+            return self._cache["value"]
+
+        s = self._login()
+        AuthClient._session = s                       # ← 类属性赋值，跨实例共享
+        AuthClient._cache["value"] = s.cookies.get(SESSION_COOKIE_NAME)
+        AuthClient._cache["time"] = time.time()
+        print(f"login success | token cached | ttl={self.ttl}s")
+        return AuthClient._cache["value"]
+
+    # ---------- 对外：获取 Session（给 HTTP 请求用，最省心） ----------
+    def get_session(self, force: bool = False) -> requests.Session:
+        """
+        返回一个已登录的 requests.Session。
+        后续 s.post(...) / s.get(...) 会自动带 cookie，无需手动塞头。
+        """
+        expired = (time.time() - AuthClient._cache["time"]) >= self.ttl
+        if force or AuthClient._session is None or expired:
+            self.get_token(force=True)
+        return AuthClient._session
+
+    # ---------- 可选：401 时统一刷新 ----------
+    def request(self, method: str, url: str, **kwargs) -> requests.Response:
+        """
+        带自动重登的请求包装：401 时 force 重登并重试一次。
+        """
+        s = self.get_session()
+        resp = s.request(method, url, **kwargs)
+        if resp.status_code == 401:
+            print(f"401 received, re-login and retry once: {method} {url}")
+            s = self.get_session(force=True)
+            resp = s.request(method, url, **kwargs)
+        return resp
+
 
 class ExecuteWorker(QThread):
     finished = Signal(pd.DataFrame, str)
@@ -50,7 +116,8 @@ class ExecuteWorker(QThread):
         self.db_name = db_name
         self.db_helper_class = db_helper_class
         self.namespace = namespace
-
+        self.client = AuthClient()
+    
     def run(self):
         # print("\n========== 进入 ExecuteWorker.run ==========")
         # print(f"DEBUG: 执行模式: {self.mode}, 连接方式: {self.source_type}, 数据库: {self.db_name}")
@@ -115,27 +182,29 @@ class ExecuteWorker(QThread):
             else: # SQL 模式
                 if self.source_type == "HTTPS":
                     print("✅ 正在通过 HTTPS 请求数据...")
-                    url = f"{STOCK_API_URL}/api/query"
-                    headers = {"Authorization": f"Bearer {STOCK_API_TOKEN}"}
-                    payload = {"sql": self.code}
-                    resp = requests.post(url, json=payload, headers=headers, timeout=30)
+                    resp = self.client.request("POST", STOCK_API_URL, json={"sql": self.code}, timeout=30)
                     resp.raise_for_status()
-                    self.namespace['df'] = pd.DataFrame(resp.json())
+                    self.namespace["df"] = pd.DataFrame(resp.json())
                     print(f"DEBUG: HTTPS 请求成功，获取数据形状: {self.namespace['df'].shape}")
-                    
+
                 elif self.source_type == "WebSocket":
                     print("✅ 正在通过 WebSocket 请求数据...")
-                    ws_url = STOCK_API_URL.replace("http", "ws") + f"/api/ws?token={STOCK_API_TOKEN}"
-                    ws = websocket.create_connection(ws_url, timeout=30)
-                    ws.send(self.code)
-                    res_data = ws.recv()
-                    ws.close()
+                    token = self.client.get_token()
+                    ws = websocket.create_connection(
+                        WS_URL, timeout=30,
+                        cookie=f"{SESSION_COOKIE_NAME}={token}",
+                    )
+                    try:
+                        ws.send(self.code)
+                        res_data = ws.recv()
+                    finally:
+                        ws.close()          # 无论成功失败，一定关闭
                     data = json.loads(res_data)
                     if isinstance(data, dict) and "error" in data:
                         raise ValueError(f"服务端错误: {data['error']}")
                     self.namespace['df'] = pd.DataFrame(data)
                     print(f"DEBUG: WebSocket 请求成功，获取数据形状: {self.namespace['df'].shape}")
-                    
+
                 else: # Database
                     current_db = self.namespace.get('db')
                     if current_db is None or getattr(current_db, 'db', None) != self.db_name:

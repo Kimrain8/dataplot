@@ -10,5 +10,8 @@ TOOLTIP_OFFSET_X = 4
 TOOLTIP_OFFSET_Y = 4
 
 # Stock API 配置
-STOCK_API_URL = "http://127.0.0.1:8000"  # stock 项目的地址
-STOCK_API_TOKEN = "your_super_secret_token_123" # 必须与 stock 保持一致
+LOGIN_URL = "http://127.0.0.1:8000/login"
+STOCK_API_URL = "http://127.0.0.1:8000/api/qry2df"
+WS_URL = "ws://127.0.0.1:8000/api/ws/qry2df"
+BASE_URL = "http://127.0.0.1:8000"
+SESSION_COOKIE = "stock2_session"
