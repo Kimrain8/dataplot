@@ -18,6 +18,7 @@ class HistogramMode(str, Enum):
 
 class AggType(str, Enum):
     NONE = "none"
+    FIRST = "first"  # 新增，用于明细展示的原值
     COUNT = "count"
     SUM = "sum"
     MEAN = "mean"

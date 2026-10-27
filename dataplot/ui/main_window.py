@@ -152,6 +152,12 @@ class HoverChip(QFrame):
     def __init__(self, field, agg, on_remove, on_agg_change, parent=None):
         super().__init__(parent)
         self.field = field
+        # 核心修复：防止 agg 是字符串（比如 "first"）导致 .value 报错
+        if isinstance(agg, str):
+            try:
+                agg = AggType(agg)
+            except ValueError:
+                agg = AggType.COUNT  # 双保险，防外部绕过
         self.setStyleSheet("QFrame { background: #e0f2fe; border: 1px solid #7dd3fc; border-radius: 4px; }")
         
         layout = QHBoxLayout(self)
@@ -880,6 +886,16 @@ class MainWindow(QMainWindow):
             if w: w.deleteLater()
             
         for f, agg in self.spec.hover_fields.items():
+            # 核心修复：在创建 UI 前拦截并校验，如果不合法，退回到 count 并提示
+            if isinstance(agg, str):
+                try:
+                    agg = AggType(agg)
+                    self.spec.hover_fields[f] = agg  # 顺手修正内存里的值
+                except ValueError:
+                    self.statusBar().showMessage(f"⚠️ 悬停字段 '{f}' 的聚合方式 '{agg}' 无效，已自动回退为 count。")
+                    agg = AggType.COUNT
+                    self.spec.hover_fields[f] = agg
+            
             chip = HoverChip(f, agg, self._remove_hover_field, self._on_hover_agg_changed)
             self.hover_tags_layout.addWidget(chip)
         self.hover_tags_layout.addStretch()
@@ -890,6 +906,26 @@ class MainWindow(QMainWindow):
         
         warnings = []
         
+        # 核心修复：拦截悬停字段为文本且要求数学聚合的情况，自动改为 first 并提示
+        if self.store.is_loaded:
+            for hf, ha in list(self.spec.hover_fields.items()):
+                if hf in self.store.df.columns:
+                    h_agg_name = ha.value if hasattr(ha, "value") else str(ha)
+                    if not pd.api.types.is_numeric_dtype(self.store.df[hf]) and h_agg_name in ["mean", "sum", "var", "std", "range"]:
+                        msg = f"提示: 悬停字段 '{hf}' 为文本，不支持 '{h_agg_name}' 聚合，已自动改为 'first'。"
+                        if msg not in warnings: 
+                            warnings.append(msg)
+                        
+                        # 1. 修改内存配置
+                        self.spec.hover_fields[hf] = AggType.FIRST
+                        
+                        # 2. 同步更新 UI 下拉框
+                        for i in range(self.hover_tags_layout.count()):
+                            w = self.hover_tags_layout.itemAt(i).widget()
+                            if isinstance(w, HoverChip) and w.field == hf:
+                                w.agg_combo.blockSignals(True)
+                                w.agg_combo.setCurrentText("first")
+                                w.agg_combo.blockSignals(False)
         if self.spec.x_hierarchy:
             for row in self.series_table._rows:
                 if row.spec.agg == AggType.NONE:
@@ -922,7 +958,7 @@ class MainWindow(QMainWindow):
         warnings.extend(canvas_warnings)
         
         if warnings:
-            self.statusBar().showMessage("提示: " + " | ".join(list(set(warnings))))
+            self.statusBar().showMessage(" | ".join(list(set(warnings))))
         else:
             self.statusBar().showMessage("就绪")
             

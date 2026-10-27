@@ -132,7 +132,8 @@ def make_brushes(df: pd.DataFrame, color_col: str | None, default_index: int, co
 
 
 def make_sizes(df: pd.DataFrame, size_col: str | None):
-    if size_col is None or not pd.api.types.is_numeric_dtype(df[size_col]):
+    # 核心修复：如果列不在数据中，直接返回默认大小
+    if size_col is None or size_col not in df.columns or not pd.api.types.is_numeric_dtype(df[size_col]):
         return DEFAULT_SIZE
     vals = _fill_median(df[size_col].to_numpy(dtype=float))
     vmin, vmax = float(vals.min()), float(vals.max())

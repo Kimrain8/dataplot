@@ -52,25 +52,25 @@ class BarRenderer(SeriesRenderer):
             return None
 
         if agg_name != "none":
-            agg_dict = {"y": agg_name}
-            if series.size:
+            def _get_agg(a):
+                return (lambda x: x.max() - x.min()) if a == "range" else a
+                
+            agg_dict = {"y": _get_agg(agg_name)}
+            if series.size and series.size in df_temp.columns:
                 sz_agg = series.size_agg.value
-                agg_dict[series.size] = sz_agg if sz_agg != "none" else "first"
+                agg_dict[series.size] = _get_agg(sz_agg if sz_agg != "none" else "first")
             
             hover_fields = ctx.get("hover_fields", {})
             for hf, h_agg in hover_fields.items():
                 if hf in df_temp.columns:
                     h_agg_name = h_agg.value if hasattr(h_agg, "value") else str(h_agg)
-                    if not pd.api.types.is_numeric_dtype(df_temp[hf]) and h_agg_name in ["mean", "sum", "var", "std"]:
+                    if not pd.api.types.is_numeric_dtype(df_temp[hf]) and h_agg_name in ["mean", "sum", "var", "std", "range"]:
                         h_agg_name = "first"
-                    agg_dict[hf] = h_agg_name if h_agg_name != "none" else "first"
+                    agg_dict[hf] = _get_agg(h_agg_name if h_agg_name != "none" else "first")
             
             extra_cols = [c for c in df_temp.columns if c not in ["x", "y", "c"] and c not in agg_dict]
             for col in extra_cols:
                 agg_dict[col] = "first"
-                
-            if agg_name == "range":
-                agg_dict["y"] = lambda x: x.max() - x.min()
                 
             agg_df = df_temp.groupby(["x", "c"], observed=True).agg(agg_dict).reset_index()
         else:
@@ -78,16 +78,16 @@ class BarRenderer(SeriesRenderer):
 
         if agg_df.empty: return None
 
+        # px_size_x, _ = viewbox.viewPixelSize()
+        # min_w_data = 3.0 * abs(px_size_x) if px_size_x != 0 else 0.0
+
         if labels is not None:
             base_width = 1.0
         else:
             unique_x = np.sort(agg_df["x"].unique())
             if len(unique_x) > 1:
                 diffs = np.diff(unique_x)
-                base_width = np.median(diffs) if len(diffs) > 0 else 1.0
-                x_min, x_max = unique_x.min(), unique_x.max()
-                if x_max > x_min:
-                    base_width = max(base_width, (x_max - x_min) * 0.02)
+                base_width = np.min(diffs) if len(diffs) > 0 else 1.0
             else:
                 base_width = 1.0
 
@@ -95,7 +95,6 @@ class BarRenderer(SeriesRenderer):
         c_map = ctx.get("color_map") or {}
         default_idx = ctx.get("index", 0)
         
-        # 核心修复：无论是否有颜色字段，都提前定义 base_rgb，防止变量未定义报错
         base_rgb = c_map.get("base_rgb", SERIES_COLORS[default_idx % len(SERIES_COLORS)])
 
         if series.size and series.size in agg_df:
@@ -118,12 +117,16 @@ class BarRenderer(SeriesRenderer):
             for i in range(len(agg_df)):
                 row = agg_df.iloc[i]
                 w = base_width * width_ratios[i] / (n_series * max(1, max_idx))
+                # if w < min_w_data: w = min_w_data
+                # 高度直接用真实数值，绝不篡改
+                h = row["y"]
+                
                 offset = (s_idx - (n_series - 1) / 2) * w
                 x_draw = row["x"] + offset + (row["idx"] - (max_idx - 1) / 2) * w
                 agg_df.loc[agg_df.index[i], "x_draw"] = x_draw
                 
                 rgb = c_map.get("map", {}).get(row["c"], base_rgb) if series.color else base_rgb
-                bar = pg.BarGraphItem(x=[x_draw], height=[row["y"]], width=w, brush=pg.mkBrush(*rgb, 200), pen=pg.mkPen("w"))
+                bar = pg.BarGraphItem(x=[x_draw], height=[h], width=w, brush=pg.mkBrush(*rgb, 200), pen=pg.mkPen("w", width=1))
                 viewbox.addItem(bar)
         else:
             if series.color:
@@ -132,24 +135,31 @@ class BarRenderer(SeriesRenderer):
                     n_c = len(sub_x)
                     for j, (idx, row) in enumerate(sub_x.iterrows()):
                         w = base_width * width_ratios[idx] / (n_series * n_c)
-                        offset = (s_idx - (n_series - 1) / 2) * (base_width * width_ratios[idx] / n_series)
+                        # if w < min_w_data: w = min_w_data
+                        h = row["y"]
+                            
+                        group_w = w * n_c
+                        offset = (s_idx - (n_series - 1) / 2) * group_w
                         c_offset = (j - (n_c - 1) / 2) * w
                         
                         x_draw = row["x"] + offset + c_offset
                         agg_df.loc[idx, "x_draw"] = x_draw
                         
                         rgb = c_map.get("map", {}).get(row["c"], base_rgb)
-                        bar = pg.BarGraphItem(x=[x_draw], height=[row["y"]], width=w, brush=pg.mkBrush(*rgb, 200), pen=pg.mkPen("w"))
+                        bar = pg.BarGraphItem(x=[x_draw], height=[h], width=w, brush=pg.mkBrush(*rgb, 200), pen=pg.mkPen("w", width=1))
                         viewbox.addItem(bar)
             else:
                 for i in range(len(agg_df)):
                     row = agg_df.iloc[i]
                     w = base_width * width_ratios[i] / n_series
+                    # if w < min_w_data: w = min_w_data
+                    h = row["y"]
+                        
                     offset = (s_idx - (n_series - 1) / 2) * w
                     x_draw = row["x"] + offset
                     agg_df.loc[agg_df.index[i], "x_draw"] = x_draw
                     
-                    bar = pg.BarGraphItem(x=[x_draw], height=[row["y"]], width=w, brush=pg.mkBrush(*base_rgb, 200), pen=pg.mkPen("w"))
+                    bar = pg.BarGraphItem(x=[x_draw], height=[h], width=w, brush=pg.mkBrush(*base_rgb, 200), pen=pg.mkPen("w", width=1))
                     viewbox.addItem(bar)
 
         agg_df = agg_df.sort_values("x_draw").reset_index(drop=True)

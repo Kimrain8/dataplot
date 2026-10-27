@@ -45,16 +45,17 @@ class CollapsiblePanel(QWidget):
 
 class CollapsibleGroupBox(QWidget):
     """上下折叠的区块（手风琴效果）。"""
-    def __init__(self, title: str, expanded: bool = True, parent=None):
+    def __init__(self, title: str, expanded: bool = True, desc: str = "", parent=None):
         super().__init__(parent)
         self._title = title
+        self._desc = desc
         self._expanded = expanded
         
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         
-        self.toggle_btn = QPushButton(f"▼ {self._title}" if expanded else f"▶ {self._title}")
+        self.toggle_btn = QPushButton(self._get_btn_text())
         self.toggle_btn.setStyleSheet(
             "QPushButton { text-align: left; padding: 5px; font-weight: bold; "
             "background: #f0f0f0; border: 1px solid #ccc; border-radius: 3px; }"
@@ -70,10 +71,17 @@ class CollapsibleGroupBox(QWidget):
         
         self.content_widget.setVisible(expanded)
 
+    def _get_btn_text(self):
+        arrow = "▼" if self._expanded else "▶"
+        if self._desc:
+            # 核心：利用 HTML 实现小字体、灰色提示，且与标题同行
+            return f"{arrow} {self._title} <span style='font-size:10px; font-weight:normal; color:#888;'>{self._desc}</span>"
+        return f"{arrow} {self._title}"
+
     def _toggle(self):
         self._expanded = not self._expanded
         self.content_widget.setVisible(self._expanded)
-        self.toggle_btn.setText(f"▼ {self._title}" if self._expanded else f"▶ {self._title}")
+        self.toggle_btn.setText(self._get_btn_text())
 
     def addWidget(self, widget: QWidget):
         self.content_layout.addWidget(widget)

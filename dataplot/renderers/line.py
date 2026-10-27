@@ -58,25 +58,25 @@ class LineRenderer(SeriesRenderer):
             if sub_df.empty: continue
 
             if agg_name != "none":
-                agg_dict = {"y": agg_name}
-                if series.size:
+                def _get_agg(a):
+                    return (lambda x: x.max() - x.min()) if a == "range" else a
+                    
+                agg_dict = {"y": _get_agg(agg_name)}
+                if series.size and series.size in df_temp.columns:
                     sz_agg = series.size_agg.value
-                    agg_dict[series.size] = sz_agg if sz_agg != "none" else "first"
+                    agg_dict[series.size] = _get_agg(sz_agg if sz_agg != "none" else "first")
                     
                 hover_fields = context.get("hover_fields", {})
                 for hf, h_agg in hover_fields.items():
                     if hf in sub_df.columns:
                         h_agg_name = h_agg.value if hasattr(h_agg, "value") else str(h_agg)
-                        if not pd.api.types.is_numeric_dtype(sub_df[hf]) and h_agg_name in ["mean", "sum", "var", "std"]:
+                        if not pd.api.types.is_numeric_dtype(sub_df[hf]) and h_agg_name in ["mean", "sum", "var", "std", "range"]:
                             h_agg_name = "first"
-                        agg_dict[hf] = h_agg_name if h_agg_name != "none" else "first"
+                        agg_dict[hf] = _get_agg(h_agg_name if h_agg_name != "none" else "first")
                 
                 extra_cols = [c for c in sub_df.columns if c not in ["x", "y", "c"] and c not in agg_dict]
                 for col in extra_cols:
                     agg_dict[col] = "first"
-                    
-                if agg_name == "range":
-                    agg_dict["y"] = lambda x: x.max() - x.min()
                     
                 agg_df = sub_df.groupby("x", observed=True).agg(agg_dict).reset_index().sort_values("x").reset_index(drop=True)
             else:
@@ -93,7 +93,6 @@ class LineRenderer(SeriesRenderer):
             else:
                 rgb = base_rgb
 
-            # 核心修复：加入 connect='finite' 保证含有 NaN 的数据也能跨越连接
             pen = pg.mkPen(rgb, width=2)
             item = pg.PlotCurveItem(x_v, y_v, pen=pen, connect='finite')
             viewbox.addItem(item)

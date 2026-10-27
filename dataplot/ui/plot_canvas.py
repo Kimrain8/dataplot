@@ -126,22 +126,26 @@ class PlotCanvas(QWidget):
         super().resizeEvent(event)
         if hasattr(self, "btn_reset"):
             w = self.layout_widget.width()
-            self.btn_reset.move(w - 105, 10)
-            self.btn_rect.move(w - 70, 10)
-            self.btn_float_up.move(w - 35, 10)
-            self.btn_float_down.move(w - 35, 45)
+            self.btn_reset.move(w - 70, 10)
+            self.btn_rect.move(w - 35, 10)
+            self.btn_float_up.move(w - 35, 45)
+            self.btn_float_down.move(w - 35, 80)
 
     def _build_reset_menu(self):
         self.reset_menu.clear()
         act_all = self.reset_menu.addAction("适应全部")
         act_all.triggered.connect(self._reset_view)
+        
         if not self.spec.series: return
+        
         self.reset_menu.addSeparator()
-        seen_y = set()
+        seen_keys = set()
         for s in self.spec.series:
-            if not s.y or s.y in seen_y: continue
-            seen_y.add(s.y)
-            label = f"{s.y} ({s.axis.value})"
+            if not s.y: continue
+            key = (s.y, s.chart_type, s.axis)
+            if key in seen_keys: continue
+            seen_keys.add(key)
+            label = f"{s.y} ({s.chart_type.value} / {s.axis.value})"
             act = self.reset_menu.addAction(label)
             act.triggered.connect(lambda checked=False, spec=s: self._reset_view_specific(spec))
 
@@ -171,10 +175,12 @@ class PlotCanvas(QWidget):
 
     def _reset_view(self):
         self._saved_ranges = None
+            
         for cell in self.cells:
             cell["plot_item"].vb.autoRange()
             if cell["right_vb"]: cell["right_vb"].autoRange()
             for vb in cell["floating_vbs"]: vb.autoRange()
+            
         self._save_current_ranges()
 
     def _reset_view_specific(self, target_spec):
@@ -215,13 +221,6 @@ class PlotCanvas(QWidget):
                 pi.vb.setRange(xRange=(x_min, x_max), yRange=cur_y, padding=0.05)
                 for fvb in cell["floating_vbs"]: 
                     fvb.setYRange(y_min, y_max, padding=0.05)
-            # pi.vb.setXRange(x_min, x_max, padding=0.05)
-            # if target_spec.axis == AxisSlot.LEFT:
-            #     pi.vb.setYRange(y_min, y_max, padding=0.05)
-            # elif target_spec.axis == AxisSlot.RIGHT:
-            #     if cell["right_vb"]: cell["right_vb"].setYRange(y_min, y_max, padding=0.05)
-            # else:
-            #     for fvb in cell["floating_vbs"]: fvb.setYRange(y_min, y_max, padding=0.05)
         self._save_current_ranges()
 
     def _toggle_rect_mode(self):
@@ -346,14 +345,18 @@ class PlotCanvas(QWidget):
             self.layout_widget.setMinimumSize(0, 0); self.layout_widget.setMaximumSize(16777215, 16777215)
         
         w = self.layout_widget.width()
-        self.btn_reset.move(w - 105, 10); self.btn_rect.move(w - 70, 10)
-        self.btn_float_up.move(w - 35, 10); self.btn_float_down.move(w - 35, 45)
+        self.btn_reset.move(w - 70, 10)
+        self.btn_rect.move(w - 35, 10)
+        self.btn_float_up.move(w - 35, 45)
+        self.btn_float_down.move(w - 35, 80)
 
         global_legends, warnings, has_float = {}, [], False
         
         for i, (fy_val, fx_val) in enumerate(facets):
             row, col = i // n_cols, i % n_cols
             pi = self.layout_widget.addPlot(row=row, col=col)
+            # 核心修复：禁用默认右键菜单，防止用户点击 Export 导致不支持多轴的报错
+            pi.setMenuEnabled(False) 
             pi.showGrid(x=True, y=True, alpha=0.3)
             
             # 注入自定义倾斜 X 轴
@@ -374,13 +377,16 @@ class PlotCanvas(QWidget):
                 if fy_val is not None: title.append(f"{self.spec.facet_y}: {fy_val}")
                 pi.setTitle(" | ".join(title))
 
-            rvb = pg.ViewBox()
+            rvb = CustomViewBox() # 换成自定义的，方便控制
             pi.scene().addItem(rvb)
             pi.getAxis("right").linkToView(rvb)
             rvb.setXLink(pi.vb)
+            
+            # 核心 2：右轴永远不接受鼠标点击（它只能被左轴牵动）
             rvb.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
             
             cell = {"plot_item": pi, "right_vb": rvb, "floating_vbs": [], "rendered": []}
+
             self.cells.append(cell)
             pi.vb.sigResized.connect(lambda *args, c=cell: self._sync_cell_vb(c))
             if i > 0: pi.setXLink(self.cells[0]["plot_item"])
@@ -400,16 +406,23 @@ class PlotCanvas(QWidget):
 
             for hf, h_agg in self.spec.hover_fields.items():
                 if hf in sub_df.columns:
-                    h_agg_name = h_agg.value if hasattr(h_agg, "value") else str(h_agg)
-                    if not pd.api.types.is_numeric_dtype(sub_df[hf]) and h_agg_name in ["mean", "sum", "var", "std"]:
-                        msg = f"悬停字段 '{hf}' 为文本，不支持 '{h_agg_name}' 聚合，已忽略。"
-                        if msg not in warnings: warnings.append(msg)
-                    else:
-                        valid_hover_fields[hf] = h_agg
+                    valid_hover_fields[hf] = h_agg
+                    # h_agg_name = h_agg.value if hasattr(h_agg, "value") else str(h_agg)
+                    # if not pd.api.types.is_numeric_dtype(sub_df[hf]) and h_agg_name in ["mean", "sum", "var", "std"]:
+                    #     msg = f"悬停字段 '{hf}' 为文本，不支持 '{h_agg_name}' 聚合，已忽略。"
+                    #     if msg not in warnings: warnings.append(msg)
+                    # else:
+                    #     valid_hover_fields[hf] = h_agg
 
             for idx, s in enumerate(self.spec.series):
-                if s.chart_type != ChartType.HISTOGRAM and s.y is None: 
+                if s.chart_type != ChartType.HISTOGRAM and (s.y is None or s.y not in sub_df.columns):
+                    msg = f"Y序列 '{s.y}' 不在当前数据中，已跳过。"
+                    if msg not in warnings: warnings.append(msg)
                     continue
+                
+                # 核心修复：如果颜色或大小字段不存在，自动置空
+                if s.color and s.color not in sub_df.columns: s.color = None
+                if s.size and s.size not in sub_df.columns: s.size = None
                 
                 if s.chart_type != ChartType.HISTOGRAM and s.y:
                     is_y_numeric = pd.api.types.is_numeric_dtype(sub_df[s.y])
@@ -419,8 +432,10 @@ class PlotCanvas(QWidget):
                         if msg not in warnings: warnings.append(msg)
                         continue
 
-                series_name = s.y or s.color or f"series_{idx}"
-                is_series_hidden = f"{series_name}||" in self.spec.hidden_categories
+                series_key = s.y or s.color or f"series_{idx}"
+                if s.y and s.chart_type:
+                    series_key = f"{series_key} ({s.chart_type.value})"
+                is_series_hidden = f"{series_key}||" in self.spec.hidden_categories
 
                 if s.axis == AxisSlot.LEFT:
                     vb = pi.vb
@@ -429,7 +444,7 @@ class PlotCanvas(QWidget):
                     vb = rvb
                     if s.y: right_y = s.y
                 else:
-                    vb = pg.ViewBox()
+                    vb = CustomViewBox()
                     pi.scene().addItem(vb)
                     vb.setXLink(pi.vb)
                     vb.setMouseEnabled(x=False, y=True)
@@ -449,17 +464,26 @@ class PlotCanvas(QWidget):
                     theme_colors = THEME_CMAPS.get(s.color_theme.value, THEME_CMAPS["default"])
                     base_rgb = theme_colors[len(theme_colors)//2]
                     c_map = {"base_rgb": base_rgb}
-                    c_legend = ColorLegend(series_name, "solid", entries=[("", base_rgb)])
+                    c_legend = ColorLegend(series_key, "solid", entries=[("", base_rgb)])
                 
                 context["color_map"] = c_map
-                if series_name not in global_legends: global_legends[series_name] = c_legend
+                if idx not in global_legends:
+                    global_legends[idx] = (series_key, c_legend)
+                # 核心修复：使用 idx 作为图例的唯一标识，避免同名字段被覆盖
+                # legend_display_name = s.y or s.color or f"series_{idx}"
+                # if s.y and s.chart_type:
+                #     # 加上图表类型后缀，方便用户区分
+                #     legend_display_name = f"{legend_display_name} ({s.chart_type.value})"
+                # 不再使用 if 判断，直接覆盖（因为 idx 绝对唯一）
+                # global_legends[idx] = (legend_display_name, c_legend)
+                # if series_name not in global_legends: global_legends[series_name] = c_legend
 
                 renderer = get_renderer(s.chart_type)
                 if renderer is None: continue
 
                 s_df = sub_df
                 if s.color:
-                    hidden_cats = [k.split("||")[1] for k in self.spec.hidden_categories if k.startswith(f"{series_name}||") and k != f"{series_name}||"]
+                    hidden_cats = [k.split("||")[1] for k in self.spec.hidden_categories if k.startswith(f"{series_key}||") and k != f"{series_key}||"]
                     if hidden_cats:
                         s_col = s_df[s.color].fillna("<缺失>").astype(str)
                         s_df = s_df[~s_col.isin(hidden_cats)].copy()
@@ -480,25 +504,21 @@ class PlotCanvas(QWidget):
 
             if self._saved_ranges and i < len(self._saved_ranges):
                 sr = self._saved_ranges[i]
-                # 核心修复：使用 setRange 同时锁定 X 和 Y，防止 pyqtgraph 内部触发联动适应
                 if sr["main"]:
-                    pi.vb.setRange(
-                        xRange=(sr["main"][0][0], sr["main"][0][1]), 
-                        yRange=(sr["main"][1][0], sr["main"][1][1]), 
-                        padding=0
-                    )
+                    pi.vb.setRange(xRange=(sr["main"][0][0], sr["main"][0][1]), yRange=(sr["main"][1][0], sr["main"][1][1]), padding=0)
                 
+                # 只有没锁定，才恢复右轴的历史范围
                 if rvb and sr.get("right"):
                     rvb.setYRange(sr["right"][1][0], sr["right"][1][1], padding=0)
                 elif rvb and has_right and not sr.get("right"):
-                    rvb.autoRange(padding=0.05)  # 新加的右轴自动适应
+                    rvb.autoRange(padding=0.05)
                 
                 for j, fvb in enumerate(cell["floating_vbs"]):
                     if sr.get("floats") and j < len(sr["floats"]):
                         fr = sr["floats"][j]
                         fvb.setYRange(fr[1][0], fr[1][1], padding=0)
                     elif not sr.get("floats") or j >= len(sr["floats"]):
-                        fvb.autoRange(padding=0.05)  # 新加的浮动轴自动适应
+                        fvb.autoRange(padding=0.05)
                         
             else:
                 has_drawn_left, has_drawn_right, has_drawn_float = False, False, False
@@ -520,7 +540,8 @@ class PlotCanvas(QWidget):
         if has_float: self.btn_float_up.show(); self.btn_float_down.show()
         else: self.btn_float_up.hide(); self.btn_float_down.hide()
 
-        return [(name, leg) for name, leg in global_legends.items()], warnings
+        # return [(name, leg) for name, leg in global_legends.items()], warnings
+        return list(global_legends.values()), warnings
 
     def _on_mouse_moved(self, pos):
         active_cell = None
@@ -537,11 +558,16 @@ class PlotCanvas(QWidget):
 
         best_rs, best_idx, min_dist = None, -1, float('inf')
 
+        # ================= 1. 第一优先级：散点图和折线图 =================
         for rs in rendered:
+            if rs.spec.chart_type == ChartType.BAR:
+                continue  # 先跳过柱状图
+                
             vb = getattr(rs, "vb", None)
             if vb is None: continue
             
             if rs.tree is not None:
+                # 散点图：利用 KDTree 查找最近的物理点
                 pt = vb.mapSceneToView(pos)
                 k = min(50, len(rs.x))
                 dists, idxs = rs.tree.query([pt.x(), pt.y()], k=k)
@@ -558,6 +584,7 @@ class PlotCanvas(QWidget):
                         best_rs = rs
                         best_idx = idx
             elif rs.sorted_x is not None and len(rs.sorted_x) > 0:
+                # 折线图：找横向最近的折点
                 pt = vb.mapSceneToView(pos)
                 idx = np.searchsorted(rs.sorted_x, pt.x())
                 idx = min(max(idx, 0), len(rs.sorted_x) - 1)
@@ -569,15 +596,53 @@ class PlotCanvas(QWidget):
                 dy = scene_pt.y() - pos.y()
                 px_dist = np.hypot(dx, dy)
                 
-                if rs.spec.chart_type == ChartType.BAR:
-                    if abs(dx) < 30: px_dist = abs(dx) if abs(dx) > 0 else 0
-                    
                 if px_dist < min_dist:
                     min_dist = px_dist
                     best_rs = rs
                     best_idx = idx
 
-        # 阈值 15，贴近鼠标
+        # 如果散点/折线图命中了，直接使用，结束查找
+        if best_rs is None or min_dist > HOVER_TOLERANCE_PX:
+            # ================= 2. 第二优先级：柱状图 =================
+            best_rs, best_idx, min_dist = None, -1, float('inf')
+            
+            for rs in rendered:
+                if rs.spec.chart_type != ChartType.BAR:
+                    continue
+                    
+                vb = getattr(rs, "vb", None)
+                if vb is None: continue
+                if rs.sorted_x is None or len(rs.sorted_x) == 0:
+                    continue
+                    
+                pt = vb.mapSceneToView(pos)
+                idx = np.searchsorted(rs.sorted_x, pt.x())
+                idx = min(max(idx, 0), len(rs.sorted_x) - 1)
+                if idx > 0 and abs(rs.sorted_x[idx-1] - pt.x()) < abs(rs.sorted_x[idx] - pt.x()):
+                    idx -= 1
+                
+                rx = rs.sorted_x[idx]
+                ry = rs.sorted_y[idx]
+                
+                # 核心修复：计算鼠标是否真实落在柱子内部
+                scene_center = vb.mapViewToScene(QPointF(rx, ry / 2))
+                scene_top = vb.mapViewToScene(QPointF(rx, ry))
+                scene_bottom = vb.mapViewToScene(QPointF(rx, 0))
+                
+                dx = scene_center.x() - pos.x()
+                # 横向允许 15 像素的容差（代表柱子宽度）
+                # 纵向必须落在 柱子顶部 和 0轴 之间（允许 5 像素的外溢容差）
+                min_y = min(scene_top.y(), scene_bottom.y()) - 5
+                max_y = max(scene_top.y(), scene_bottom.y()) + 5
+                
+                if abs(dx) < 15 and min_y <= pos.y() <= max_y:
+                    px_dist = abs(dx)
+                    if px_dist < min_dist:
+                        min_dist = px_dist
+                        best_rs = rs
+                        best_idx = idx
+
+        # ================= 3. 最终判定并展示 =================
         if best_rs is not None and min_dist < HOVER_TOLERANCE_PX:
             row = best_rs.data.iloc[best_idx]
             
@@ -603,6 +668,8 @@ class PlotCanvas(QWidget):
             lines = [f"<b>{x_col_name} = {display_x}</b>"]
             
             name = best_rs.spec.y or best_rs.spec.chart_type.value
+            if best_rs.spec.y:
+                name = f"{best_rs.spec.y} ({best_rs.spec.chart_type.value})"
             if "y" in row: y_val = row["y"]
             elif "y_plot" in row: y_val = row["y_plot"]
             else: y_val = row.get(best_rs.spec.y, 0)
@@ -624,8 +691,21 @@ class PlotCanvas(QWidget):
             self.tooltip.setText("<br>".join(lines))
             self.tooltip.adjustSize()
             local = self.layout_widget.mapFromScene(pos)
-            # 偏移量改为 7，贴近鼠标
             self.tooltip.move(local.x() + TOOLTIP_OFFSET_X, local.y() + TOOLTIP_OFFSET_Y)
             self.tooltip.show()
         else:
             self.tooltip.hide()
+
+class CustomViewBox(pg.ViewBox):
+    """用于支持 Shift/Ctrl 滚轮独立缩放，以及双击重置"""
+    def wheelEvent(self, ev, axis=None):
+        modifiers = ev.modifiers()
+        if axis is None:
+            if modifiers & Qt.KeyboardModifier.ShiftModifier: axis = 0
+            elif modifiers & Qt.KeyboardModifier.ControlModifier: axis = 1
+        super().wheelEvent(ev, axis)
+
+    def mouseDoubleClickEvent(self, ev):
+        if ev.button() == Qt.MouseButton.LeftButton:
+            self.autoRange()
+        super().mouseDoubleClickEvent(ev)

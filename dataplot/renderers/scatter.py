@@ -52,25 +52,25 @@ class ScatterRenderer(SeriesRenderer):
             df_temp["c"] = "all"
 
         if agg_name != "none":
-            agg_dict = {"y_plot": agg_name}
-            if series.size:
+            def _get_agg(a):
+                return (lambda x: x.max() - x.min()) if a == "range" else a
+                
+            agg_dict = {"y_plot": _get_agg(agg_name)}
+            if series.size and series.size in df_temp.columns:
                 sz_agg = series.size_agg.value
-                agg_dict[series.size] = sz_agg if sz_agg != "none" else "first"
+                agg_dict[series.size] = _get_agg(sz_agg if sz_agg != "none" else "first")
             
             hover_fields = context.get("hover_fields", {})
             for hf, h_agg in hover_fields.items():
                 if hf in df_temp.columns:
                     h_agg_name = h_agg.value if hasattr(h_agg, "value") else str(h_agg)
-                    if not pd.api.types.is_numeric_dtype(df_temp[hf]) and h_agg_name in ["mean", "sum", "var", "std"]:
+                    if not pd.api.types.is_numeric_dtype(df_temp[hf]) and h_agg_name in ["mean", "sum", "var", "std", "range"]:
                         h_agg_name = "first"
-                    agg_dict[hf] = h_agg_name if h_agg_name != "none" else "first"
+                    agg_dict[hf] = _get_agg(h_agg_name if h_agg_name != "none" else "first")
 
             extra_cols = [c for c in df_temp.columns if c not in ["x_plot", "y_plot", "c"] and c not in agg_dict]
             for col in extra_cols:
                 agg_dict[col] = "first"
-                
-            if agg_name == "range":
-                agg_dict["y_plot"] = lambda x: x.max() - x.min()
                 
             df_agg = df_temp.groupby(["x_plot", "c"], observed=True).agg(agg_dict).reset_index()
         else:
@@ -94,7 +94,4 @@ class ScatterRenderer(SeriesRenderer):
 
         tree = cKDTree(np.column_stack((plot_x, plot_y)))
         
-        order = np.argsort(plot_x)
-        sorted_df = df_agg.iloc[order].reset_index(drop=True)
-        
-        return [RenderedSeries(series, plot_x, plot_y, None, plot_x[order], plot_y[order], sorted_df, tree)]
+        return [RenderedSeries(series, plot_x, plot_y, None, plot_x, plot_y, df_agg, tree)]
