@@ -1,5 +1,5 @@
 {
-  "py_code": "",
+  "py_code": "def get_positional_encoding(seq_len: int, d_model: int) -> pd.DataFrame:\n    assert d_model % 2 == 0, \"d_model must be even\"\n    pos = np.arange(seq_len)[:, None]\n    i = np.arange(d_model // 2)[None, :]\n    denom = np.power(10000, 2 * i / d_model)\n\n    pe = np.zeros((seq_len, d_model))\n    pe[:, 0::2] = np.sin(pos / denom)\n    pe[:, 1::2] = np.cos(pos / denom)\n\n    df = pd.DataFrame(pe, columns=[f\"dim_{k}\" for k in range(d_model)])\n    df.index.name = \"pos\"\n    return df\n\ndf = get_positional_encoding(seq_len=1000, d_model=64)",
   "sql_code": "select mcs.name_hy ,qqt.update_time,mcs.sw_l3 ,sum(qqt.vol) as vol,sum(qqt.amount) as amount,\nsum(case when qqt.pct_chg > 0 then 1 else 0 end) as cnt1,sum(case when qqt.pct_chg < 0 then 1 else 1 end) as cnt2,\nsum(case when qqt.pct_chg > 0 then 1 else 0 end)/(sum(case when qqt.pct_chg > 0 then 1 else 0 end) +sum(case when qqt.pct_chg < 0 then 1 else 1 end)) as pct\nfrom qq_qt_detail_tmp AS qqt join my_choice_stock AS mcs on qqt.symbol = mcs.symbol\nwhere qqt.update_time >= '2026-10-15 09:32:00'\ngroup by mcs.name_hy,qqt.update_time ,mcs.sw_l3\nhaving pct >= 0.15\norder by pct desc;",
   "db_list": [
     "jhd",

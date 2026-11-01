@@ -15,3 +15,4 @@ STOCK_API_URL = "http://127.0.0.1:8000/api/qry2df"
 WS_URL = "ws://127.0.0.1:8000/api/ws/qry2df"
 BASE_URL = "http://127.0.0.1:8000"
 SESSION_COOKIE = "stock2_session"
+RFLH_INTV = 800

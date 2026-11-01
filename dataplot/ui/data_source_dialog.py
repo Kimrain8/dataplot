@@ -249,7 +249,9 @@ class ExecuteWorker(QThread):
 
 
 class DataSourceDialog(QDialog):
-    data_applied = Signal(pd.DataFrame)
+    # data_applied = Signal(pd.DataFrame)
+    # data_applied = Signal(pd.DataFrame, dict) # 增加3D显示
+    data_applied = Signal(pd.DataFrame, object) # 增加3D显示
 
     def __init__(self, db_helper_class, parent=None):
         super().__init__(parent)
@@ -509,9 +511,12 @@ class DataSourceDialog(QDialog):
             else:
                 final_df = self.current_df
                 
-            # print(f"DEBUG: 准备通过 emit 发送数据，形状: {final_df.shape}")
+            # 增加3D显示
             self.global_namespace['df'] = final_df
-            self.data_applied.emit(final_df)
+            idx_dict = self.global_namespace.get('idx', {}) # 增加3D显示
+            # self.data_applied.emit(final_df) 
+            # print("DEBUG: 提取到的 idx_dict 是:", idx_dict)
+            self.data_applied.emit(final_df, idx_dict) #增加3D显示
             # print("DEBUG: emit 信号发送完毕")
             self.hide()
         except Exception as e:

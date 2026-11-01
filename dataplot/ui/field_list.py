@@ -14,7 +14,7 @@ class FieldItemWidget(QWidget):
         layout = QHBoxLayout(self)
         layout.setContentsMargins(2, 2, 2, 2)
         
-        self.label = QLabel(col_name)
+        self.label = QLabel(str(col_name))
         layout.addWidget(self.label, 1)
         
         self.combo = QComboBox()

@@ -9,7 +9,8 @@ from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QPen, QDrag
 from PySide6.QtWidgets import (
     QFileDialog, QHBoxLayout, QLabel, QListWidgetItem, QListWidget,
     QMainWindow, QPushButton, QVBoxLayout, QWidget, QScrollArea, QMessageBox,
-    QComboBox, QCompleter, QFrame, QDialog, QLineEdit, QMenu, QListWidgetItem
+    QComboBox, QCompleter, QFrame, QDialog, QLineEdit, QMenu, QListWidgetItem,
+    QCheckBox  # 增加3D显示
 )
 
 from dataplot.core.datastore import DataStore
@@ -23,6 +24,7 @@ from dataplot.ui.plot_canvas import PlotCanvas
 from dataplot.ui.series_table import SeriesTable
 from dataplot.ui.drop_combo import DropComboBox
 from dataplot.ui.data_source_dialog import DataSourceDialog
+from dataplot.ui.pandas_model import PandasModel
 
 DB_IMPORT_ERROR = None
 try:
@@ -197,6 +199,9 @@ class MainWindow(QMainWindow):
         self._current_project_path = None
         self._is_loading_from_project = False
         self._is_rebuilding_ui = False  # <-- 新增这句
+        
+        self.idx_dict = {} # 增加3D显示
+        self.special_mode = None # 增加3D显示
 
         self.data_source_dialog = None
         if MySQLHelper:
@@ -211,6 +216,7 @@ class MainWindow(QMainWindow):
         root = QHBoxLayout(central)
         root.setContentsMargins(4, 4, 4, 4)
 
+        # ============ 左侧面板 ============
         self.left_panel = CollapsiblePanel("数据源", direction="left", expanded_width=260)
         left_scroll = QScrollArea()
         left_scroll.setWidgetResizable(True)
@@ -247,9 +253,11 @@ class MainWindow(QMainWindow):
         self.left_panel.content_layout().addWidget(left_scroll)
         root.addWidget(self.left_panel)
 
+        # ============ 中央画布 ============
         self.canvas = PlotCanvas(self.store, self.spec)
         root.addWidget(self.canvas, 1)
 
+        # ============ 右侧面板 ============
         self.right_panel = CollapsiblePanel("配置", direction="right", expanded_width=380)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -260,11 +268,57 @@ class MainWindow(QMainWindow):
         right_lay = QVBoxLayout(right_widget)
         right_lay.setSpacing(10)
         
-        tip = QLabel("提示：Ctrl+左键拖拽平移，Shift+滚轮缩放X轴，Ctrl+滚轮缩放Y轴，双击重置")
-        tip.setStyleSheet("color: #666; font-size: 11px; font-weight: bold;")
-        tip.setWordWrap(True)
-        right_lay.addWidget(tip)
+        # ---------- 1. 特殊图形面板 (新增) ----------
+        self.special_group = CollapsibleGroupBox("特殊图形", expanded=True)
+        
+        self.chk_3d_surf = QCheckBox("3D 曲面图 (Matrix)")
+        self.chk_3d_surf.toggled.connect(self._on_special_mode_changed)
+        self.special_group.addWidget(self.chk_3d_surf)
+        # 新增：曲面图的下拉渲染模式
+        self.surf_mode_widget = QWidget()
+        surf_mode_lay = QHBoxLayout(self.surf_mode_widget)
+        surf_mode_lay.setContentsMargins(15, 0, 0, 0)
+        surf_mode_lay.addWidget(QLabel("渲染方式:"))
+        self.surf_mode_combo = QComboBox()
+        self.surf_mode_combo.addItems(["平滑曲面", "离散散点 (p='Y')"])
+        self.surf_mode_combo.currentIndexChanged.connect(self._rerender_special_surf)
+        surf_mode_lay.addWidget(self.surf_mode_combo)
+        self.surf_mode_widget.hide()
+        self.special_group.addWidget(self.surf_mode_widget)
+        
+        self.chk_3d_scatter = QCheckBox("3D 散点图 (XYZ)")
+        self.chk_3d_scatter.toggled.connect(self._on_special_mode_changed)
+        self.special_group.addWidget(self.chk_3d_scatter)
+        
+        # 3D 散点专属配置
+        self.scatter_config_widget = QWidget()
+        scatter_lay = QVBoxLayout(self.scatter_config_widget)
+        scatter_lay.setContentsMargins(15, 0, 0, 0)
+        self.xyz_combos = {}
+        for ax in ["X轴", "Y轴", "Z轴", "颜色"]:
+            row = QHBoxLayout()
+            row.addWidget(QLabel(ax))
+            combo = QComboBox()
+            combo.currentIndexChanged.connect(self._rerender_special_scatter)
+            row.addWidget(combo)
+            scatter_lay.addLayout(row)
+            self.xyz_combos[ax] = combo
+        self.scatter_config_widget.hide()
+        self.special_group.addWidget(self.scatter_config_widget)
+        
+        self.chk_pairs = QCheckBox("点对动画 (Pairs)")
+        self.chk_pairs.toggled.connect(self._on_special_mode_changed)
+        self.special_group.addWidget(self.chk_pairs)
+        
+        right_lay.addWidget(self.special_group)
 
+        # ---------- 2. 常规 2D 配置面板 (用 normal_2d_group 包裹，以便隐藏) ----------
+        self.normal_2d_group = QWidget()
+        normal_lay = QVBoxLayout(self.normal_2d_group)
+        normal_lay.setContentsMargins(0, 0, 0, 0)
+        normal_lay.setSpacing(10)
+
+        # 切片
         self.facet_group = CollapsibleGroupBox("切片 (Facet)", expanded=True)
         facet_row1 = QHBoxLayout()
         facet_row1.addWidget(QLabel("X 切片:"))
@@ -290,25 +344,29 @@ class MainWindow(QMainWindow):
         size_lay.addWidget(self.cell_size_combo)
         size_lay.addStretch()
         self.facet_group.addLayout(size_lay)
-        right_lay.addWidget(self.facet_group)
+        normal_lay.addWidget(self.facet_group)
 
+        # X轴
         self.x_group = CollapsibleGroupBox("X 轴（全局）", expanded=True)
         self.x_combo = DropComboBox("拖入或选择 X 字段")
         self.x_combo.fieldDropped.connect(self._on_x)
         self.x_group.addWidget(self.x_combo)
-        right_lay.addWidget(self.x_group)
+        normal_lay.addWidget(self.x_group)
 
+        # 分桶
         self.bucket_group = CollapsibleGroupBox("分桶 (Bucketing)", expanded=True)
         self.bucket_layout = QVBoxLayout()
         self.bucket_group.addLayout(self.bucket_layout)
-        right_lay.addWidget(self.bucket_group)
+        normal_lay.addWidget(self.bucket_group)
 
+        # Y序列
         self.y_group = CollapsibleGroupBox("Y 序列", expanded=True)
         self.series_table = SeriesTable()
         self.series_table.changed.connect(self._on_series_changed)
         self.y_group.addWidget(self.series_table)
-        right_lay.addWidget(self.y_group)
+        normal_lay.addWidget(self.y_group)
 
+        # 悬停额外字段
         self.hover_group = CollapsibleGroupBox("悬停额外字段", expanded=True)
         self.hover_combo = QComboBox()
         self.hover_combo.setEditable(True)
@@ -324,22 +382,26 @@ class MainWindow(QMainWindow):
         self.hover_tags_layout.setSpacing(4)
         self.hover_tags_layout.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self.hover_group.addWidget(self.hover_tags_widget)
-        right_lay.addWidget(self.hover_group)
+        normal_lay.addWidget(self.hover_group)
 
+        # 图例（保留在 2D 区域中）
         self.legend_group = CollapsibleGroupBox("图例（点击隐藏/显示）", expanded=False)
         self.legend_panel = LegendPanel()
         self.legend_panel.legendToggled.connect(self._on_legend_toggled)
         self.legend_group.addWidget(self.legend_panel)
-        right_lay.addWidget(self.legend_group)
+        normal_lay.addWidget(self.legend_group)
         
+        right_lay.addWidget(self.normal_2d_group)
+
+        # 面板收尾
         right_lay.addStretch()
         scroll.setWidget(right_widget)
         self.right_panel.content_layout().addWidget(scroll)
         root.addWidget(self.right_panel)
 
+        # ============ 顶部工具栏 ============
         toolbar = self.addToolBar("主")
         
-        # 文件菜单增强
         file_menu = QMenu(self)
         act_new = file_menu.addAction("新建项目...")
         act_new.triggered.connect(self._new_project)
@@ -405,17 +467,89 @@ class MainWindow(QMainWindow):
         
         self.canvas.render()
         self.statusBar().showMessage("已新建项目")
+    
+    # 增加3D显示
+    # 【新增方法】处理特殊图形互斥和切换
+    def _on_special_mode_changed(self):
+        sender = self.sender()
+        if sender == self.chk_3d_surf and self.chk_3d_surf.isChecked():
+            self.chk_3d_scatter.blockSignals(True); self.chk_3d_scatter.setChecked(False); self.chk_3d_scatter.blockSignals(False)
+            self.chk_pairs.blockSignals(True); self.chk_pairs.setChecked(False); self.chk_pairs.blockSignals(False)
+            self.special_mode = "3d_surface"
+            self.scatter_config_widget.hide()
+            self.surf_mode_widget.show()  # 显示下拉框
+            self.normal_2d_group.hide()
+            
+            self._rerender_special_surf()
+            
+        elif sender == self.chk_3d_scatter and self.chk_3d_scatter.isChecked():
+            self.chk_3d_surf.blockSignals(True); self.chk_3d_surf.setChecked(False); self.chk_3d_surf.blockSignals(False)
+            self.chk_pairs.blockSignals(True); self.chk_pairs.setChecked(False); self.chk_pairs.blockSignals(False)
+            self.special_mode = "3d_scatter"
+            self.scatter_config_widget.show()
+            self.surf_mode_widget.hide()  # 隐藏下拉框
+            self.normal_2d_group.hide()
+            
+            if self.store.is_loaded:
+                self._rerender_special_scatter()
+                
+        elif sender == self.chk_pairs and self.chk_pairs.isChecked():
+            self.chk_3d_surf.blockSignals(True); self.chk_3d_surf.setChecked(False); self.chk_3d_surf.blockSignals(False)
+            self.chk_3d_scatter.blockSignals(True); self.chk_3d_scatter.setChecked(False); self.chk_3d_scatter.blockSignals(False)
+            self.special_mode = "pairs"
+            self.scatter_config_widget.hide()
+            self.surf_mode_widget.hide()
+            self.normal_2d_group.hide()
+            
+            if not self.store.is_loaded: return
+            self.canvas.show_special_pairs(self.store.df, self.idx_dict)
+        else:
+            self.special_mode = None
+            self.scatter_config_widget.hide()
+            self.surf_mode_widget.hide()
+            self.normal_2d_group.show()
+            self.canvas.stop_special_animation()
+            self._rerender(reset_view=True)
+    def _rerender_special_surf(self):
+        if not self.store.is_loaded or self.special_mode != "3d_surface": return
+        df_num = self.store.df.select_dtypes(include=np.number)
+        if df_num.shape[1] != self.store.df.shape[1]:
+            QMessageBox.warning(self, "错误", "3D曲面图要求所有列均为数值类型。")
+            self.chk_3d_surf.setChecked(False)
+            return
+            
+        scatter_mode = (self.surf_mode_combo.currentIndex() == 1)
+        self.canvas.show_special_3d_surface(df_num, scatter_mode)
+    def _rerender_special_scatter(self):
+        if not self.store.is_loaded or self.special_mode != "3d_scatter": 
+            return
+            
+        x = self.xyz_combos["X轴"].currentText()
+        y = self.xyz_combos["Y轴"].currentText()
+        z = self.xyz_combos["Z轴"].currentText()
+        c = self.xyz_combos["颜色"].currentText()
+        
+        if x and y and z:
+            self.canvas.show_special_3d_scatter(self.store.df, x, y, z, c)
+    
     def _open_data_source(self):
         if not MySQLHelper:
             QMessageBox.critical(self, "模块加载失败", f"无法加载 utils.dbManager。\n错误详情:\n{DB_IMPORT_ERROR}")
             return
+        if self.store.is_loaded and self.data_source_dialog:
+            self.data_source_dialog.global_namespace['df'] = self.store.df
+            self.data_source_dialog.current_df = self.store.df
+            self.data_source_dialog.model = PandasModel(self.store.df, max_rows=1000)
+            self.data_source_dialog.table_view.setModel(self.data_source_dialog.model)
+            self.data_source_dialog.table_info.setText(f"总计 {len(self.store.df)} 行。仅展示前 1000 行。")
         self.data_source_dialog.show()
         self.data_source_dialog.raise_()
         self.data_source_dialog.activateWindow()
 
-    def _on_data_applied(self, df):
+    def _on_data_applied(self, df, idx_dict):
         # print(f"DEBUG: \n========== 主窗口接收到数据 ==========")
         # print(f"DEBUG: 接收到的数据形状: {df.shape if df is not None else 'None'}")
+        self.idx_dict = idx_dict
         
         if df is None or df.empty: return
         
@@ -474,13 +608,26 @@ class MainWindow(QMainWindow):
         self.facet_y_combo.set_field(self.spec.facet_y)
         
         for col in cols:
-            w = FieldItemWidget(col, str(self.store.df[col].dtype))
+            w = FieldItemWidget(str(col), str(self.store.df[col].dtype))
             w.typeChanged.connect(self._on_type_changed)
             item = QListWidgetItem()
             item.setSizeHint(w.sizeHint())
             self.field_list.addItem(item)
             self.field_list.setItemWidget(item, w)
             self.hover_combo.addItem(col)
+
+        # 增加3D显示
+        for ax, combo in self.xyz_combos.items():
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItems(cols)
+            combo.blockSignals(False)
+        if len(cols) >= 3:
+            self.xyz_combos["X轴"].setCurrentIndex(0)
+            self.xyz_combos["Y轴"].setCurrentIndex(1)
+            self.xyz_combos["Z轴"].setCurrentIndex(2)
+            if len(cols) >= 4:
+                self.xyz_combos["颜色"].setCurrentIndex(3)
 
         completer = self.hover_combo.completer()
         if completer:
@@ -901,6 +1048,9 @@ class MainWindow(QMainWindow):
         self.hover_tags_layout.addStretch()
 
     def _rerender(self, reset_view=False):
+        # 增加3D显示
+        if self.special_mode:
+            return # 特殊图形由各方法独立触发，这里直接跳过
         # 核心修复：每次重绘前，强制把最新的 spec 同步给画布，防止对象脱钩
         self.canvas.spec = self.spec
         

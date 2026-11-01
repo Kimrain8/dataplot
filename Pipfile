@@ -18,6 +18,8 @@ cryptography = "*"
 pyinstaller = "*"
 requests = "*"
 websocket-client = "*"
+pyopengl = "*"
+pyopengl-accelerate = "*"
 
 [dev-packages]
 

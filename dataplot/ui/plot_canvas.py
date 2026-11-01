@@ -1,13 +1,17 @@
 import numpy as np
 import pandas as pd
 import pyqtgraph as pg
-from PySide6.QtCore import Qt, QPointF, QRectF
+from PySide6.QtCore import Qt, QPointF, QRectF, QTimer
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget, QToolButton, QScrollArea, QMenu
 
 from dataplot.core.spec import AxisSlot, ChartType, ChartSpec, AggType
 from dataplot.renderers.registry import get_renderer
 from dataplot.core.encoding import get_color_mapping, ColorLegend, THEME_CMAPS
-from dataplot.config import HOVER_TOLERANCE_PX, TOOLTIP_OFFSET_X, TOOLTIP_OFFSET_Y
+from dataplot.config import HOVER_TOLERANCE_PX, TOOLTIP_OFFSET_X, TOOLTIP_OFFSET_Y, RFLH_INTV
+
+from PySide6.QtWidgets import QStackedWidget, QCheckBox
+import pyqtgraph.opengl as gl
+from dataplot.renderers.special_3d import render_3d_surface, render_3d_scatter, PairsAnimator
 
 class AngledAxisItem(pg.AxisItem):
     def __init__(self, *args, **kwargs):
@@ -51,6 +55,9 @@ class PlotCanvas(QWidget):
         self.cell_size = 400
         self._saved_ranges = None
         
+        # 增加3D显示
+        self.stack = QStackedWidget(self)
+        
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setFrameShape(QScrollArea.Shape.NoFrame)
@@ -59,6 +66,11 @@ class PlotCanvas(QWidget):
         self.layout_widget.setBackground("w")
         self.scroll_area.setWidget(self.layout_widget)
         
+        # 增加3D显示  新增 OpenGL 画布
+        self.gl_widget = gl.GLViewWidget()
+        self.stack.addWidget(self.scroll_area)
+        self.stack.addWidget(self.gl_widget)
+        
         self.tooltip = QLabel(self.layout_widget)
         self.tooltip.setStyleSheet("background: rgba(255,255,255,235); border: 1px solid #888; padding: 4px; font-size: 11px;")
         self.tooltip.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
@@ -66,7 +78,8 @@ class PlotCanvas(QWidget):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self.scroll_area)
+        # layout.addWidget(self.scroll_area)
+        layout.addWidget(self.stack) #增加3D显示
 
         btn_style = (
             "QToolButton { background: rgba(255,255,255,0.85); border: 1px solid #aaa; "
@@ -121,6 +134,98 @@ class PlotCanvas(QWidget):
         self.btn_float_down.hide()
 
         self.layout_widget.scene().sigMouseMoved.connect(self._on_mouse_moved)
+        
+
+        # 核心修复：动画状态及定时器由画布统一管理，防止 GC 回收
+        self.anim_scatter = None
+        self.anim_data = None
+        self.anim_dict = {}
+        self.anim_frames = []
+        self.anim_idx = 0
+        self.anim_timer = QTimer()
+        self.anim_timer.timeout.connect(self._on_anim_tick)
+
+    # 增加3D显示
+    # 【新增方法】进入 3D 曲面
+    def show_special_3d_surface(self, df, scatter_mode=False):
+        self.stack.setCurrentWidget(self.gl_widget)
+        self._cleanup_cells()
+        render_3d_surface(self.gl_widget, df, scatter_mode)
+
+    # 增加3D显示【新增方法】进入 3D 散点
+    def show_special_3d_scatter(self, df, x, y, z, c):
+        self.stack.setCurrentWidget(self.gl_widget)
+        self._cleanup_cells()
+        render_3d_scatter(self.gl_widget, df, x, y, z, c)
+    # 增加3D显示 【新增方法】进入 2D 动画
+    def show_special_pairs(self, df, idx_dict):
+        # print("\n>>> [Canvas DEBUG] 进入 show_special_pairs")
+        self.stack.setCurrentWidget(self.scroll_area)
+        self._cleanup_cells()
+        self.layout_widget.clear()
+        
+        pi = self.layout_widget.addPlot(row=0, col=0)
+        pi.showGrid(x=True, y=True, alpha=0.3)
+        
+        if df.shape[1] < 2: return
+        x = pd.to_numeric(df.iloc[:, 0], errors='coerce').values
+        y = pd.to_numeric(df.iloc[:, 1], errors='coerce').values
+        mask = np.isfinite(x) & np.isfinite(y)
+        x, y = x[mask], y[mask]
+        
+        # print(f">>>> [Canvas DEBUG] 准备渲染的有效点数: {len(x)}")
+        if len(x) == 0: return
+        
+        # 核心修复：保存 x 和 y 供动画循环使用
+        self.anim_x = x
+        self.anim_y = y
+        self.anim_dict = idx_dict
+        self.anim_frames = sorted(list(idx_dict.keys()))
+        self.anim_idx = 0
+        
+        self.anim_colors = np.zeros((len(x), 4), dtype=np.uint8)
+        self.anim_colors[:, 3] = 255
+        self.anim_colors[:, :3] = 50  # 默认深灰
+        
+        self.anim_scatter = pg.ScatterPlotItem()
+        pi.addItem(self.anim_scatter)
+        
+        # 初始化时强制传一次数据
+        self.anim_scatter.setData(x=self.anim_x, y=self.anim_y, brush=self.anim_colors, size=12)
+        pi.autoRange()
+        
+        if self.anim_frames:
+            self.anim_timer.start(RFLH_INTV)
+            # print(">>>> [Canvas DEBUG] 动画定时器已启动！")
+
+    # 增加3D显示 【新增方法】停止动画
+    def stop_special_animation(self):
+        self.anim_timer.stop()
+        self.anim_scatter = None
+        self.stack.setCurrentWidget(self.scroll_area)
+    # 增加3D显示
+    def _on_anim_tick(self):
+        if not self.anim_frames or self.anim_scatter is None: 
+            return
+        
+        # 重置所有点为深灰色
+        self.anim_colors[:, :3] = 50
+        
+        if self.anim_idx < len(self.anim_frames):
+            key = self.anim_frames[self.anim_idx]
+            pt_indices = self.anim_dict[key]
+            # print(f">>>> [Canvas DEBUG] 正在播放第 {self.anim_idx} 帧, 变红索引: {pt_indices}")
+            
+            for i in pt_indices:
+                if i < len(self.anim_colors): 
+                    self.anim_colors[i] = [255, 0, 0, 255]  # 变红
+            self.anim_idx += 1
+        else:
+            self.anim_idx = 0
+            
+        # 核心修复：把 x 和 y 坐标连同 brush 一起传入，强制触发重绘
+        self.anim_scatter.setData(x=self.anim_x, y=self.anim_y, brush=self.anim_colors)
+
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -293,6 +398,13 @@ class PlotCanvas(QWidget):
         return df
 
     def render(self, reset_view=False):
+        # 增加3D显示
+        if hasattr(self, 'stack') and self.stack.currentWidget() == self.gl_widget:
+            return [], []
+        
+        if self.anim_timer.isActive() and self.anim_scatter is not None:
+            return [], []
+        
         # print("\n>>> DEBUG: 进入 PlotCanvas.render")
         if not self.store.is_loaded:
             # print(">>> DEBUG: store 未加载，直接返回")
