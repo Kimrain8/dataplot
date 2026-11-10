@@ -1,30 +1,46 @@
 # -*- mode: python ; coding: utf-8 -*-
 import os
-from PyInstaller.utils.hooks import collect_all, collect_submodules
+from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files
 
-# 核心：强制收集 mysql 相关的所有动态库、数据和隐藏模块，保留 C 扩展
 datas, binaries, hiddenimports = collect_all('mysql')
-hiddenimports += collect_submodules('mysql.connector')
+hiddenimports += collect_submodules('mysql.connector', on_error='ignore')
 
-# 如果你需要把外部的 utils 目录打包进去（假设它在项目根目录下）
-# 如果 utils 在外层目录，请将 'utils' 替换为 'D:/pyprj/cv2/utils'
+# PySide6：只收集必要的数据，不 collect_submodules 全部
+datas += collect_data_files('PySide6')
+# 手动补充确实用到的 PySide6 模块，而非全部
+hiddenimports += [
+    'PySide6.QtCore',
+    'PySide6.QtGui',
+    'PySide6.QtWidgets',
+    'PySide6.QtNetwork',
+    'PySide6.QtOpenGLWidgets',
+    'PySide6.QtSvg',
+    'PySide6.QtTest',
+    'shiboken6',
+]
+
+# pyqtgraph：只收集子模块，跳过两个已不存在的模板
+hiddenimports += collect_submodules('pyqtgraph', on_error='ignore')
+
 utils_data = [('utils', 'utils')] if os.path.exists('utils') else []
-
-# 收集 templates 模板文件夹
 templates_data = [('templates', 'templates')]
 
 a = Analysis(
     ['main.py'],
     pathex=[],
-    binaries=binaries,           # 注入 mysql 收集到的底层 DLL
-    datas=datas + utils_data + templates_data,  # 注入 mysql 数据 + 模板 + utils
-    hiddenimports=hiddenimports, # 注入所有隐藏的 Python 模块
+    binaries=binaries,
+    datas=datas + utils_data + templates_data,
+    hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=['tkinter', 'matplotlib', 'pyarrow', 'IPython', 'jupyter'],
     noarchive=False,
 )
+
+# 过滤掉 OpenGL 旧版 vc9 DLL（消除 MSVCR90.dll 警告，减小体积）
+a.binaries = [b for b in a.binaries if 'vc9.dll' not in b[0].lower()]
+
 pyz = PYZ(a.pure)
 
 exe = EXE(

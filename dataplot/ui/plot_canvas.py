@@ -782,9 +782,10 @@ class PlotCanvas(QWidget):
             name = best_rs.spec.y or best_rs.spec.chart_type.value
             if best_rs.spec.y:
                 name = f"{best_rs.spec.y} ({best_rs.spec.chart_type.value})"
-            if "y" in row: y_val = row["y"]
-            elif "y_plot" in row: y_val = row["y_plot"]
-            else: y_val = row.get(best_rs.spec.y, 0)
+            # if "y" in row: y_val = row["y"]
+            # elif "y_plot" in row: y_val = row["y_plot"]
+            # else: y_val = row.get(best_rs.spec.y, 0)
+            y_val = row.get(best_rs.spec.y, 0)  # my fix
                 
             if isinstance(y_val, (float, int, np.number)): y_val_str = f"{y_val:.4g}"
             else: y_val_str = str(y_val)
